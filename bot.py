@@ -625,25 +625,31 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             try:
                 # Send reply back to the group as a direct reply to the user's message
                 if update.message.sticker:
-                    await context.bot.send_sticker(
+                    sent_message = await context.bot.send_sticker(
                         chat_id=target_group_id,
                         sticker=update.message.sticker.file_id,
                         reply_to_message_id=original_group_msg_id
                     )
                 elif update.message.text:
-                    await context.bot.send_message(
+                    sent_message = await context.bot.send_message(
                         chat_id=target_group_id,
                         text=update.message.text,
                         reply_to_message_id=original_group_msg_id
                     )
                 else:
                     # For other media types
-                    await context.bot.copy_message(
+                    sent_message = await context.bot.copy_message(
                         chat_id=target_group_id,
                         from_chat_id=update.message.chat_id,
                         message_id=update.message.message_id,
                         reply_to_message_id=original_group_msg_id
                     )
+                
+                # Store mapping for reactions - your reply in group to your private message
+                group_to_private_mappings[f"{target_group_id}_{sent_message.message_id}"] = {
+                    "private_chat_id": update.message.chat_id,
+                    "private_message_id": update.message.message_id
+                }
                 
                 # Update stats
                 update_stats(user_id, "reply_handled")
@@ -735,7 +741,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 message_id=update.message.message_id
             )
             
-            # Store mapping for reply functionality (NO INFO MESSAGE)
+            # Store mapping for reply functionality
             message_mappings[forwarded_msg.message_id] = {
                 'original_group_message_id': update.message.message_id,
                 'sender': update.message.from_user,
@@ -761,14 +767,27 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
     user_id = update.message_reaction.user.id
     chat_id = update.message_reaction.chat.id
     message_id = update.message_reaction.message_id
-    new_reactions = update.message_reaction.new_reactions
     
-    logger.info(f"Reaction detected: User {user_id}, Chat {chat_id}, Message {message_id}, Reactions {new_reactions}")
+    # Get reactions - handle both old and new reaction formats
+    try:
+        if hasattr(update.message_reaction, 'new_reaction'):
+            # Old format
+            reactions = update.message_reaction.new_reaction or []
+        else:
+            # New format
+            reactions = getattr(update.message_reaction, 'new_reactions', [])
+    except Exception as e:
+        logger.error(f"Error getting reactions: {e}")
+        reactions = []
+    
+    logger.info(f"Reaction detected: User {user_id}, Chat {chat_id}, Message {message_id}, Reactions: {reactions}")
     
     # Handle reactions in private chat (from owner)
     if update.message_reaction.chat.type == "private":
         if not is_owner(user_id):
             return
+        
+        logger.info(f"Owner reaction in private chat on message {message_id}")
         
         # Check if this is a reaction to a forwarded group message (reply)
         if message_id in message_mappings:
@@ -781,13 +800,13 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.set_message_reaction(
                     chat_id=group_id,
                     message_id=group_message_id,
-                    reaction=new_reactions
+                    reaction=reactions
                 )
-                logger.info(f"Mirrored reaction from private to group: {group_id}_{group_message_id}")
+                logger.info(f"✅ Mirrored reaction from private to group: {group_id}_{group_message_id}")
                 update_stats(user_id, "reaction_handled")
                 
             except Exception as e:
-                logger.error(f"Failed to set reaction in group: {e}")
+                logger.error(f"❌ Failed to set reaction in group: {e}")
         
         # Check if this is a reaction to a message that was sent to groups
         # Look in group_to_private_mappings for any group messages that correspond to this private message
@@ -805,16 +824,18 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                     await context.bot.set_message_reaction(
                         chat_id=group_id,
                         message_id=group_message_id,
-                        reaction=new_reactions
+                        reaction=reactions
                     )
-                    logger.info(f"Mirrored reaction from private to group message: {group_id}_{group_message_id}")
+                    logger.info(f"✅ Mirrored reaction from private to group message: {group_id}_{group_message_id}")
                     update_stats(user_id, "reaction_handled")
                     
                 except Exception as e:
-                    logger.error(f"Failed to set reaction in group for sent message: {e}")
+                    logger.error(f"❌ Failed to set reaction in group for sent message: {e}")
     
     # Handle reactions in group (from users to bot's messages)
     elif update.message_reaction.chat.type in ["group", "supergroup"]:
+        logger.info(f"User reaction in group {chat_id} on message {message_id}")
+        
         # Check if this is a reaction to a message sent by the bot
         try:
             message = await context.bot.get_message(chat_id, message_id)
@@ -833,12 +854,12 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                         await context.bot.set_message_reaction(
                             chat_id=mapping["private_chat_id"],
                             message_id=mapping["private_message_id"],
-                            reaction=new_reactions
+                            reaction=reactions
                         )
-                        logger.info(f"Mirrored reaction from group reply to private: {reaction_key}")
+                        logger.info(f"✅ Mirrored reaction from group reply to private: {reaction_key}")
                         update_stats(int(OWNER_ID), "reaction_handled")
                     except Exception as e:
-                        logger.error(f"Failed to set reaction in private for reply: {e}")
+                        logger.error(f"❌ Failed to set reaction in private for reply: {e}")
                 
                 # Check if this is a regular message we sent to the group
                 group_key = f"{chat_id}_{message_id}"
@@ -849,15 +870,15 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                         await context.bot.set_message_reaction(
                             chat_id=mapping["private_chat_id"],
                             message_id=mapping["private_message_id"],
-                            reaction=new_reactions
+                            reaction=reactions
                         )
-                        logger.info(f"Mirrored reaction from group to private: {group_key}")
+                        logger.info(f"✅ Mirrored reaction from group to private: {group_key}")
                         update_stats(int(OWNER_ID), "reaction_handled")
                     except Exception as e:
-                        logger.error(f"Failed to set reaction in private for sent message: {e}")
+                        logger.error(f"❌ Failed to set reaction in private for sent message: {e}")
                 
         except Exception as e:
-            logger.error(f"Failed to handle group reaction: {e}")
+            logger.error(f"❌ Failed to handle group reaction: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
@@ -933,11 +954,14 @@ application.add_handler(MessageHandler(
     handle_group_message
 ))
 
-# Handle message reactions
-application.add_handler(MessageHandler(
-    filters.ALL,
-    handle_message_reaction
-))
+# Handle message reactions with a dedicated handler for reaction updates
+from telegram.ext import MessageReactionHandler
+
+async def handle_reaction_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle message reaction updates"""
+    await handle_message_reaction(update, context)
+
+application.add_handler(MessageReactionHandler(handle_reaction_update))
 
 def start_bot():
     """Start Telegram bot in polling mode"""
