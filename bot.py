@@ -10,7 +10,8 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
-    CallbackQueryHandler
+    CallbackQueryHandler,
+    MessageReactionHandler
 )
 from pymongo import MongoClient
 from datetime import datetime, timezone
@@ -754,8 +755,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "private_message_id": forwarded_msg.message_id
             }
             
-            # No info message - just the forwarded message
-            
         except Exception as e:
             logger.error(f"Failed to forward group reply to owner: {e}")
 
@@ -767,20 +766,9 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
     user_id = update.message_reaction.user.id
     chat_id = update.message_reaction.chat.id
     message_id = update.message_reaction.message_id
+    new_reactions = update.message_reaction.new_reaction
     
-    # Get reactions - handle both old and new reaction formats
-    try:
-        if hasattr(update.message_reaction, 'new_reaction'):
-            # Old format
-            reactions = update.message_reaction.new_reaction or []
-        else:
-            # New format
-            reactions = getattr(update.message_reaction, 'new_reactions', [])
-    except Exception as e:
-        logger.error(f"Error getting reactions: {e}")
-        reactions = []
-    
-    logger.info(f"Reaction detected: User {user_id}, Chat {chat_id}, Message {message_id}, Reactions: {reactions}")
+    logger.info(f"Reaction detected: User {user_id}, Chat {chat_id}, Message {message_id}, Reactions: {new_reactions}")
     
     # Handle reactions in private chat (from owner)
     if update.message_reaction.chat.type == "private":
@@ -800,7 +788,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.set_message_reaction(
                     chat_id=group_id,
                     message_id=group_message_id,
-                    reaction=reactions
+                    reaction=new_reactions
                 )
                 logger.info(f"✅ Mirrored reaction from private to group: {group_id}_{group_message_id}")
                 update_stats(user_id, "reaction_handled")
@@ -824,7 +812,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                     await context.bot.set_message_reaction(
                         chat_id=group_id,
                         message_id=group_message_id,
-                        reaction=reactions
+                        reaction=new_reactions
                     )
                     logger.info(f"✅ Mirrored reaction from private to group message: {group_id}_{group_message_id}")
                     update_stats(user_id, "reaction_handled")
@@ -854,7 +842,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                         await context.bot.set_message_reaction(
                             chat_id=mapping["private_chat_id"],
                             message_id=mapping["private_message_id"],
-                            reaction=reactions
+                            reaction=new_reactions
                         )
                         logger.info(f"✅ Mirrored reaction from group reply to private: {reaction_key}")
                         update_stats(int(OWNER_ID), "reaction_handled")
@@ -870,7 +858,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                         await context.bot.set_message_reaction(
                             chat_id=mapping["private_chat_id"],
                             message_id=mapping["private_message_id"],
-                            reaction=reactions
+                            reaction=new_reactions
                         )
                         logger.info(f"✅ Mirrored reaction from group to private: {group_key}")
                         update_stats(int(OWNER_ID), "reaction_handled")
@@ -954,14 +942,8 @@ application.add_handler(MessageHandler(
     handle_group_message
 ))
 
-# Handle message reactions with a dedicated handler for reaction updates
-from telegram.ext import MessageReactionHandler
-
-async def handle_reaction_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle message reaction updates"""
-    await handle_message_reaction(update, context)
-
-application.add_handler(MessageReactionHandler(handle_reaction_update))
+# Handle message reactions with dedicated handler
+application.add_handler(MessageReactionHandler(handle_message_reaction))
 
 def start_bot():
     """Start Telegram bot in polling mode"""
