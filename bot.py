@@ -320,10 +320,14 @@ async def handle_group_selection(update: Update, context: ContextTypes.DEFAULT_T
                 successful_forwards += 1
                 
                 # Store mapping for reactions - group message to private message
-                group_to_private_mappings[f"{group_id}_{sent_message.message_id}"] = {
+                # This is CRITICAL for reaction mirroring from groups to private
+                mapping_key = f"{group_id}_{sent_message.message_id}"
+                group_to_private_mappings[mapping_key] = {
                     "private_chat_id": message_data["chat_id"],
                     "private_message_id": message_data["message_id"]
                 }
+                
+                logger.info(f"📝 Stored group-to-private mapping: {mapping_key} -> {message_data['chat_id']}_{message_data['message_id']}")
                 
                 # Update stats for each successful send
                 update_stats(user_id, "message_sent")
@@ -647,10 +651,22 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     )
                 
                 # Store mapping for reactions - your reply in group to your private message
-                group_to_private_mappings[f"{target_group_id}_{sent_message.message_id}"] = {
+                mapping_key = f"{target_group_id}_{sent_message.message_id}"
+                group_to_private_mappings[mapping_key] = {
                     "private_chat_id": update.message.chat_id,
                     "private_message_id": update.message.message_id
                 }
+                
+                logger.info(f"📝 Stored reply mapping: {mapping_key} -> {update.message.chat_id}_{update.message.message_id}")
+                
+                # Also store the reverse mapping for the original group message that was replied to
+                original_mapping_key = f"{target_group_id}_{original_group_msg_id}"
+                if original_mapping_key not in group_to_private_mappings:
+                    group_to_private_mappings[original_mapping_key] = {
+                        "private_chat_id": original_private_msg.chat_id,
+                        "private_message_id": original_private_msg.message_id
+                    }
+                    logger.info(f"📝 Stored original message mapping: {original_mapping_key}")
                 
                 # Update stats
                 update_stats(user_id, "reply_handled")
@@ -755,6 +771,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "private_message_id": forwarded_msg.message_id
             }
             
+            logger.info(f"📝 Stored group reply mapping: {group_id}_{update.message.message_id} -> {OWNER_ID}_{forwarded_msg.message_id}")
+            
         except Exception as e:
             logger.error(f"Failed to forward group reply to owner: {e}")
 
@@ -768,14 +786,14 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
     message_id = update.message_reaction.message_id
     new_reactions = update.message_reaction.new_reaction
     
-    logger.info(f"Reaction detected: User {user_id}, Chat {chat_id}, Message {message_id}, Reactions: {new_reactions}")
+    logger.info(f"🔔 Reaction detected: User {user_id}, Chat {chat_id}, Message {message_id}, Reactions: {new_reactions}")
     
     # Handle reactions in private chat (from owner)
     if update.message_reaction.chat.type == "private":
         if not is_owner(user_id):
             return
         
-        logger.info(f"Owner reaction in private chat on message {message_id}")
+        logger.info(f"👤 Owner reaction in private chat on message {message_id}")
         
         # Check if this is a reaction to a forwarded group message (reply)
         if message_id in message_mappings:
@@ -790,7 +808,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                     message_id=group_message_id,
                     reaction=new_reactions
                 )
-                logger.info(f"✅ Mirrored reaction from private to group: {group_id}_{group_message_id}")
+                logger.info(f"✅ Mirrored reaction from private to group reply: {group_id}_{group_message_id}")
                 update_stats(user_id, "reaction_handled")
                 
             except Exception as e:
@@ -798,6 +816,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
         
         # Check if this is a reaction to a message that was sent to groups
         # Look in group_to_private_mappings for any group messages that correspond to this private message
+        mapping_found = False
         for key, mapping in group_to_private_mappings.items():
             if (mapping["private_chat_id"] == chat_id and 
                 mapping["private_message_id"] == message_id):
@@ -816,13 +835,17 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                     )
                     logger.info(f"✅ Mirrored reaction from private to group message: {group_id}_{group_message_id}")
                     update_stats(user_id, "reaction_handled")
+                    mapping_found = True
                     
                 except Exception as e:
                     logger.error(f"❌ Failed to set reaction in group for sent message: {e}")
+        
+        if not mapping_found:
+            logger.warning(f"⚠️ No mapping found for private message {chat_id}_{message_id}")
     
     # Handle reactions in group (from users to bot's messages)
     elif update.message_reaction.chat.type in ["group", "supergroup"]:
-        logger.info(f"User reaction in group {chat_id} on message {message_id}")
+        logger.info(f"👥 User reaction in group {chat_id} on message {message_id}")
         
         # Check if this is a reaction to a message sent by the bot
         try:
@@ -831,7 +854,10 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                 # This is a reaction to bot's message in group
                 owner_connections = get_all_connections(int(OWNER_ID))
                 if chat_id not in owner_connections:
+                    logger.warning(f"⚠️ Group {chat_id} not in connected groups")
                     return
+                
+                reaction_mirrored = False
                 
                 # Check if this is a reply that we have mapped
                 reaction_key = f"{chat_id}_{message_id}"
@@ -846,6 +872,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                         )
                         logger.info(f"✅ Mirrored reaction from group reply to private: {reaction_key}")
                         update_stats(int(OWNER_ID), "reaction_handled")
+                        reaction_mirrored = True
                     except Exception as e:
                         logger.error(f"❌ Failed to set reaction in private for reply: {e}")
                 
@@ -862,8 +889,13 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                         )
                         logger.info(f"✅ Mirrored reaction from group to private: {group_key}")
                         update_stats(int(OWNER_ID), "reaction_handled")
+                        reaction_mirrored = True
                     except Exception as e:
                         logger.error(f"❌ Failed to set reaction in private for sent message: {e}")
+                
+                if not reaction_mirrored:
+                    logger.warning(f"⚠️ No mapping found for group message {chat_id}_{message_id}")
+                    logger.info(f"📋 Available mappings for this group: {[k for k in group_to_private_mappings.keys() if k.startswith(str(chat_id))]}")
                 
         except Exception as e:
             logger.error(f"❌ Failed to handle group reaction: {e}")
