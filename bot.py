@@ -50,16 +50,6 @@ def is_owner(user_id: int) -> bool:
     """Check if user is the owner"""
     return str(user_id) == OWNER_ID
 
-def get_user_mention(user) -> str:
-    """Generate user mention for tagging"""
-    if user.username:
-        return f"@{user.username}"
-    else:
-        full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
-        # Escape HTML characters to prevent issues
-        safe_name = html.escape(full_name)
-        return f'<a href="tg://user?id={user.id}">{safe_name}</a>'
-
 # Command handlers
 async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /connect command"""
@@ -87,7 +77,7 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔄 New Feature:\n"
             "- When someone replies to my messages in group, I'll forward them to you\n"
             "- Reply to those messages and I'll send your response back to the same person!\n"
-            "- The bot will tag (mention) the user when responding in group"
+            "- The bot will reply directly to their message (native Telegram reply)"
         )
     except ValueError:
         await update.message.reply_text("Invalid group ID. Must be an integer.")
@@ -121,38 +111,22 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             original_sender = mapping['sender']
             
             try:
-                # Get user mention for tagging
-                user_mention = get_user_mention(original_sender)
-                
-                # Send reply back to the group as a reply to the original user's message
+                # Send reply back to the group as a direct reply to the user's message
+                # This will naturally show "Replying to [user]" in Telegram
                 if update.message.sticker:
-                    # Send the mention first, then the sticker as a reply to the mention
-                    mention_msg = await context.bot.send_message(
-                        chat_id=group_id,
-                        text=f"👤 {user_mention}",
-                        parse_mode='HTML'
-                    )
                     await context.bot.send_sticker(
                         chat_id=group_id,
                         sticker=update.message.sticker.file_id,
                         reply_to_message_id=original_group_msg_id
                     )
                 elif update.message.text:
-                    # For text messages, send directly as reply with mention
                     await context.bot.send_message(
                         chat_id=group_id,
-                        text=f"👤 {user_mention}\n{update.message.text}",
-                        reply_to_message_id=original_group_msg_id,
-                        parse_mode='HTML'
+                        text=update.message.text,
+                        reply_to_message_id=original_group_msg_id
                     )
                 else:
                     # For other media types
-                    mention_msg = await context.bot.send_message(
-                        chat_id=group_id,
-                        text=f"👤 {user_mention}",
-                        reply_to_message_id=original_group_msg_id,
-                        parse_mode='HTML'
-                    )
                     await context.bot.copy_message(
                         chat_id=group_id,
                         from_chat_id=update.message.chat_id,
@@ -225,23 +199,23 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 message_id=update.message.message_id
             )
             
-            # Store mapping for reply functionality - store the ORIGINAL group message ID (the user's reply)
+            # Store mapping for reply functionality
             message_mappings[forwarded_msg.message_id] = {
                 'original_group_message_id': update.message.message_id,  # This is the user's reply message ID in group
                 'sender': update.message.from_user,
                 'group_id': group_id
             }
             
-            # Send info message to owner with user mention
-            user_mention = get_user_mention(update.message.from_user)
+            # Send info message to owner
+            user_name = update.message.from_user.first_name
+            if update.message.from_user.username:
+                user_name = f"@{update.message.from_user.username}"
             
             info_msg = await context.bot.send_message(
                 chat_id=OWNER_ID,
-                text=f"💬 Reply from {user_mention} in group.\n"
-                     f"📝 You can reply to this message to respond to them!\n"
-                     f"🔔 They will be tagged when you reply.",
-                reply_to_message_id=forwarded_msg.message_id,
-                parse_mode='HTML'
+                text=f"💬 Reply from {user_name} in group.\n"
+                     f"📝 Reply to this message to respond to them directly!",
+                reply_to_message_id=forwarded_msg.message_id
             )
             
         except Exception as e:
@@ -264,7 +238,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔄 New Features:\n"
         "- When someone replies to my messages in group, I'll forward them to you\n"
         "- Reply to those messages and I'll send your response back!\n"
-        "- The bot will tag (mention) users when responding in group\n\n"
+        "- The bot will use native Telegram replies (shows 'Replying to [user]')\n\n"
         "⚠️ Note: Only you (the owner) can use this bot."
     )
 
