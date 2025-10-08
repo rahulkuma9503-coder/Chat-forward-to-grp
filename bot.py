@@ -3,13 +3,14 @@ import logging
 import threading
 import html
 from flask import Flask
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes
+    ContextTypes,
+    CallbackQueryHandler
 )
 from pymongo import MongoClient
 from datetime import datetime, timezone
@@ -52,6 +53,8 @@ message_mappings = {}
 reaction_mappings = {}
 # Store active connections and group info
 active_groups = {}
+# Store pending messages for group selection
+pending_messages = {}
 
 @app.route('/')
 def health_check():
@@ -181,6 +184,163 @@ def get_bot_stats(owner_id: int):
         "all_time": all_time_stats
     }
 
+def create_group_selection_keyboard(owner_id: int, selected_groups: list = None):
+    """Create inline keyboard for group selection"""
+    if selected_groups is None:
+        selected_groups = []
+    
+    connections = get_all_connections(owner_id)
+    keyboard = []
+    
+    for group_id, group_info in connections.items():
+        is_selected = group_id in selected_groups
+        emoji = "✅" if is_selected else "⬜"
+        button_text = f"{emoji} {group_info['name']}"
+        
+        # Truncate long group names
+        if len(button_text) > 50:
+            button_text = button_text[:47] + "..."
+        
+        keyboard.append([InlineKeyboardButton(
+            button_text,
+            callback_data=f"select_group_{group_id}"
+        )])
+    
+    # Add action buttons
+    if connections:
+        keyboard.append([
+            InlineKeyboardButton("🚀 Send to Selected", callback_data="send_to_selected"),
+            InlineKeyboardButton("✅ Select All", callback_data="select_all")
+        ])
+        keyboard.append([
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_send")
+        ])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+async def handle_group_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle group selection inline buttons"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    callback_data = query.data
+    
+    if not is_owner(user_id):
+        await query.edit_message_text("❌ You are not authorized to use this bot.")
+        return
+    
+    # Get current pending message data
+    pending_data = pending_messages.get(user_id)
+    if not pending_data:
+        await query.edit_message_text("❌ Message data expired. Please send the message again.")
+        return
+    
+    selected_groups = pending_data.get("selected_groups", [])
+    
+    if callback_data.startswith("select_group_"):
+        group_id = int(callback_data.split("_")[2])
+        
+        # Toggle selection
+        if group_id in selected_groups:
+            selected_groups.remove(group_id)
+        else:
+            selected_groups.append(group_id)
+        
+        # Update pending data
+        pending_data["selected_groups"] = selected_groups
+        pending_messages[user_id] = pending_data
+        
+        # Update keyboard
+        keyboard = create_group_selection_keyboard(user_id, selected_groups)
+        selected_count = len(selected_groups)
+        
+        await query.edit_message_text(
+            f"📤 **Select Groups to Send Message**\n\n"
+            f"📍 **Message Preview:**\n"
+            f"{pending_data.get('preview', 'Media message')}\n\n"
+            f"✅ **Selected:** {selected_count} group(s)\n"
+            f"👇 Tap groups to select/deselect",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    
+    elif callback_data == "select_all":
+        # Select all groups
+        connections = get_all_connections(user_id)
+        selected_groups = list(connections.keys())
+        pending_data["selected_groups"] = selected_groups
+        pending_messages[user_id] = pending_data
+        
+        keyboard = create_group_selection_keyboard(user_id, selected_groups)
+        await query.edit_message_text(
+            f"📤 **Select Groups to Send Message**\n\n"
+            f"📍 **Message Preview:**\n"
+            f"{pending_data.get('preview', 'Media message')}\n\n"
+            f"✅ **Selected:** {len(selected_groups)} group(s)\n"
+            f"👇 Tap groups to select/deselect",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    
+    elif callback_data == "send_to_selected":
+        if not selected_groups:
+            await query.answer("❌ Please select at least one group!", show_alert=True)
+            return
+        
+        # Send message to selected groups
+        successful_forwards = 0
+        failed_forwards = []
+        
+        message_data = pending_data["message_data"]
+        connections = get_all_connections(user_id)
+        
+        for group_id in selected_groups:
+            try:
+                if message_data["type"] == "sticker":
+                    await context.bot.send_sticker(
+                        chat_id=group_id,
+                        sticker=message_data["sticker_id"]
+                    )
+                elif message_data["type"] == "text":
+                    await context.bot.send_message(
+                        chat_id=group_id,
+                        text=message_data["text"]
+                    )
+                else:
+                    # For other media types
+                    await context.bot.copy_message(
+                        chat_id=group_id,
+                        from_chat_id=message_data["chat_id"],
+                        message_id=message_data["message_id"]
+                    )
+                successful_forwards += 1
+                
+                # Update stats for each successful send
+                update_stats(user_id, "message_sent")
+                
+            except Exception as e:
+                logger.error(f"Failed to forward to group {group_id}: {e}")
+                group_name = connections.get(group_id, {}).get('name', f'ID: {group_id}')
+                failed_forwards.append(f"{group_name} (ID: {group_id})")
+        
+        # Send summary to owner
+        summary_message = f"✅ Message sent to {successful_forwards} group(s)!"
+        if failed_forwards:
+            summary_message += f"\n❌ Failed in {len(failed_forwards)} group(s):\n" + "\n".join(failed_forwards)
+        
+        await query.edit_message_text(summary_message)
+        
+        # Clean up pending message
+        if user_id in pending_messages:
+            del pending_messages[user_id]
+    
+    elif callback_data == "cancel_send":
+        await query.edit_message_text("❌ Message sending cancelled.")
+        # Clean up pending message
+        if user_id in pending_messages:
+            del pending_messages[user_id]
+
 # Command handlers
 async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /connect command"""
@@ -231,7 +391,7 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Connected to {group_type}: {group_name} (ID: {group_id})!\n\n"
             "🔄 Features:\n"
-            "- Send any message to me and I'll forward it to all connected groups\n"
+            "- Send any message and select groups to send to\n"
             "- When someone replies to my messages, I'll forward them to you\n"
             "- Reply to those messages and I'll send your response back!\n"
             "- React to messages and I'll mirror reactions in groups\n"
@@ -492,47 +652,53 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 )
             return
     
-    # Normal message forwarding (not a reply) - send to ALL connected groups
-    successful_forwards = 0
-    failed_forwards = []
+    # Normal message forwarding (not a reply) - show group selection
+    message_data = {
+        "type": "text",
+        "chat_id": update.message.chat_id,
+        "message_id": update.message.message_id,
+        "text": update.message.text if update.message.text else "Media message"
+    }
     
-    for group_id, group_info in connections.items():
-        try:
-            if update.message.sticker:
-                await context.bot.send_sticker(
-                    chat_id=group_id,
-                    sticker=update.message.sticker.file_id
-                )
-            else:
-                await context.bot.copy_message(
-                    chat_id=group_id,
-                    from_chat_id=update.message.chat_id,
-                    message_id=update.message.message_id
-                )
-            successful_forwards += 1
-        except Exception as e:
-            logger.error(f"Failed to forward to group {group_id}: {e}")
-            failed_forwards.append(f"{group_info['name']} (ID: {group_id})")
-    
-    # Update stats for successful sends
-    if successful_forwards > 0:
-        for _ in range(successful_forwards):
-            update_stats(user_id, "message_sent")
-    
-    # Send summary to owner
-    if successful_forwards > 0 and not failed_forwards:
-        await update.message.reply_text(f"✅ Message sent to {successful_forwards} group(s)!")
-    elif successful_forwards > 0 and failed_forwards:
-        summary = f"✅ Sent to {successful_forwards} group(s)\n❌ Failed in {len(failed_forwards)} group(s):\n"
-        summary += "\n".join(failed_forwards)
-        await update.message.reply_text(summary)
+    if update.message.sticker:
+        message_data = {
+            "type": "sticker",
+            "chat_id": update.message.chat_id,
+            "message_id": update.message.message_id,
+            "sticker_id": update.message.sticker.file_id,
+            "preview": "🎨 Sticker"
+        }
+    elif update.message.text:
+        # Truncate long text for preview
+        preview = update.message.text
+        if len(preview) > 100:
+            preview = preview[:97] + "..."
+        message_data["preview"] = preview
     else:
-        await update.message.reply_text(
-            "❌ Failed to send message to all groups. Make sure:\n"
-            "1. I'm added to all groups\n"
-            "2. I have 'Send Messages' permission\n"
-            "3. Try reconnecting with /connect"
-        )
+        # For media messages
+        caption_preview = update.message.caption or "Media message"
+        if len(caption_preview) > 100:
+            caption_preview = caption_preview[:97] + "..."
+        message_data["preview"] = caption_preview
+    
+    # Store pending message
+    pending_messages[user_id] = {
+        "message_data": message_data,
+        "selected_groups": []  # Start with no groups selected
+    }
+    
+    # Create and send group selection keyboard
+    keyboard = create_group_selection_keyboard(user_id)
+    
+    await update.message.reply_text(
+        f"📤 **Select Groups to Send Message**\n\n"
+        f"📍 **Message Preview:**\n"
+        f"{message_data.get('preview', 'Media message')}\n\n"
+        f"✅ **Selected:** 0 group(s)\n"
+        f"👇 Tap groups to select/deselect",
+        reply_markup=keyboard,
+        parse_mode='Markdown'
+    )
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming group messages (only replies to bot's messages)"""
@@ -658,8 +824,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /stats - Show all connected groups with details\n"
         "• /botstats - Detailed bot statistics and analytics\n\n"
         "🔄 Features:\n"
-        "- Connect to multiple groups simultaneously\n"
-        "- Messages are forwarded to ALL connected groups\n"
+        "- Send messages and select specific groups to send to\n"
         "- Reply to group messages and bot will respond\n"
         "- React to messages and bot will mirror reactions\n"
         "- View detailed group statistics\n"
@@ -673,6 +838,9 @@ application.add_handler(CommandHandler("connect", connect_command))
 application.add_handler(CommandHandler("disconnect", disconnect_command))
 application.add_handler(CommandHandler("stats", stats_command))
 application.add_handler(CommandHandler("botstats", botstats_command))
+
+# Handle group selection callbacks
+application.add_handler(CallbackQueryHandler(handle_group_selection, pattern="^(select_group_|send_to_selected|select_all|cancel_send)"))
 
 # Handle quick disconnect commands (e.g., /disconnect_123456789)
 async def quick_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
