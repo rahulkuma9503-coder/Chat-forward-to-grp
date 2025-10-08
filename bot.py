@@ -58,6 +58,8 @@ group_to_private_mappings = {}
 active_groups = {}
 # Store pending messages for group selection
 pending_messages = {}
+# Store edit mappings - track messages that can be edited
+edit_mappings = {}
 
 @app.route('/')
 def health_check():
@@ -136,7 +138,8 @@ def update_stats(owner_id: int, action: str):
         "connections_added": 1 if action == "connection_added" else 0,
         "connections_removed": 1 if action == "connection_removed" else 0,
         "replies_handled": 1 if action == "reply_handled" else 0,
-        "reactions_handled": 1 if action == "reaction_handled" else 0
+        "reactions_handled": 1 if action == "reaction_handled" else 0,
+        "edits_handled": 1 if action == "edit_handled" else 0
     }
     
     stats_collection.update_one(
@@ -174,7 +177,8 @@ def get_bot_stats(owner_id: int):
             "total_replies": {"$sum": "$replies_handled"},
             "total_connections_added": {"$sum": "$connections_added"},
             "total_connections_removed": {"$sum": "$connections_removed"},
-            "total_reactions": {"$sum": "$reactions_handled"}
+            "total_reactions": {"$sum": "$reactions_handled"},
+            "total_edits": {"$sum": "$edits_handled"}
         }}
     ]
     
@@ -320,14 +324,23 @@ async def handle_group_selection(update: Update, context: ContextTypes.DEFAULT_T
                 successful_forwards += 1
                 
                 # Store mapping for reactions - group message to private message
-                # This is CRITICAL for reaction mirroring from groups to private
                 mapping_key = f"{group_id}_{sent_message.message_id}"
                 group_to_private_mappings[mapping_key] = {
                     "private_chat_id": message_data["chat_id"],
                     "private_message_id": message_data["message_id"]
                 }
                 
+                # Store edit mapping - private message to group message
+                edit_key = f"{message_data['chat_id']}_{message_data['message_id']}"
+                if edit_key not in edit_mappings:
+                    edit_mappings[edit_key] = []
+                edit_mappings[edit_key].append({
+                    "group_id": group_id,
+                    "group_message_id": sent_message.message_id
+                })
+                
                 logger.info(f"📝 Stored group-to-private mapping: {mapping_key} -> {message_data['chat_id']}_{message_data['message_id']}")
+                logger.info(f"📝 Stored edit mapping: {edit_key} -> {group_id}_{sent_message.message_id}")
                 
                 # Update stats for each successful send
                 update_stats(user_id, "message_sent")
@@ -408,6 +421,7 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "- When someone replies to BOT'S messages in connected groups, I'll forward them to you\n"
             "- When someone mentions/tags the bot in groups, I'll forward those messages to you\n"
             "- Reply to those messages and I'll send your response back!\n"
+            "- Edit your messages and I'll update them in groups automatically\n"
             "- React to messages and I'll mirror reactions in groups\n"
             "- Use /stats to see all connected groups\n"
             "- Use /disconnect <group_id> to remove a group\n"
@@ -565,6 +579,7 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"• Total Messages Sent: `{stats['all_time'].get('total_messages', 0)}`\n"
         message += f"• Total Replies Handled: `{stats['all_time'].get('total_replies', 0)}`\n"
         message += f"• Total Reactions Handled: `{stats['all_time'].get('total_reactions', 0)}`\n"
+        message += f"• Total Edits Handled: `{stats['all_time'].get('total_edits', 0)}`\n"
         message += f"• Total Connections Added: `{stats['all_time'].get('total_connections_added', 0)}`\n"
         message += f"• Total Connections Removed: `{stats['all_time'].get('total_connections_removed', 0)}`\n"
     
@@ -574,6 +589,7 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"• Messages Sent: `{stats['today'].get('messages_sent', 0)}`\n"
         message += f"• Replies Handled: `{stats['today'].get('replies_handled', 0)}`\n"
         message += f"• Reactions Handled: `{stats['today'].get('reactions_handled', 0)}`\n"
+        message += f"• Edits Handled: `{stats['today'].get('edits_handled', 0)}`\n"
         message += f"• Connections Added: `{stats['today'].get('connections_added', 0)}`\n"
         message += f"• Connections Removed: `{stats['today'].get('connections_removed', 0)}`\n"
     else:
@@ -658,7 +674,17 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     "private_message_id": update.message.message_id
                 }
                 
+                # Store edit mapping for the reply
+                edit_key = f"{update.message.chat_id}_{update.message.message_id}"
+                if edit_key not in edit_mappings:
+                    edit_mappings[edit_key] = []
+                edit_mappings[edit_key].append({
+                    "group_id": target_group_id,
+                    "group_message_id": sent_message.message_id
+                })
+                
                 logger.info(f"📝 Stored reply mapping: {mapping_key} -> {update.message.chat_id}_{update.message.message_id}")
+                logger.info(f"📝 Stored edit mapping for reply: {edit_key} -> {target_group_id}_{sent_message.message_id}")
                 
                 # Also store the reverse mapping for the original group message that was replied to
                 original_mapping_key = f"{target_group_id}_{original_group_msg_id}"
@@ -731,6 +757,55 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=keyboard,
         parse_mode='Markdown'
     )
+
+async def handle_private_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle edited private messages from owner"""
+    # Owner check
+    if not is_owner(update.edited_message.from_user.id):
+        return
+    
+    user_id = update.edited_message.from_user.id
+    private_chat_id = update.edited_message.chat_id
+    private_message_id = update.edited_message.message_id
+    
+    # Check if this edited message has group mappings
+    edit_key = f"{private_chat_id}_{private_message_id}"
+    
+    if edit_key in edit_mappings:
+        group_messages = edit_mappings[edit_key]
+        successful_edits = 0
+        failed_edits = []
+        
+        for group_msg in group_messages:
+            group_id = group_msg["group_id"]
+            group_message_id = group_msg["group_message_id"]
+            
+            try:
+                # Edit the corresponding group message
+                if update.edited_message.text:
+                    await context.bot.edit_message_text(
+                        chat_id=group_id,
+                        message_id=group_message_id,
+                        text=update.edited_message.text
+                    )
+                    successful_edits += 1
+                    logger.info(f"✅ Edited group message: {group_id}_{group_message_id}")
+                # Note: Currently only text editing is supported
+                # For other message types, we'd need different edit methods
+                
+            except Exception as e:
+                logger.error(f"Failed to edit group message {group_id}_{group_message_id}: {e}")
+                failed_edits.append(f"Group {group_id} (Message {group_message_id})")
+        
+        # Update stats
+        if successful_edits > 0:
+            update_stats(user_id, "edit_handled")
+            logger.info(f"✅ Successfully edited {successful_edits} group message(s)")
+        
+        if failed_edits:
+            logger.warning(f"❌ Failed to edit {len(failed_edits)} group message(s): {failed_edits}")
+    else:
+        logger.info(f"ℹ️ No edit mapping found for private message: {edit_key}")
 
 async def handle_bot_related_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle ONLY messages in connected groups that are replies to bot OR mention the bot"""
@@ -978,6 +1053,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- When someone replies to BOT'S messages in connected groups, I'll forward them to you\n"
         "- When someone mentions/tags the bot in groups, I'll forward those messages to you\n"
         "- Reply to those messages and I'll send your response back!\n"
+        "- Edit your messages and I'll update them in groups automatically\n"
         "- React to messages and I'll mirror reactions in groups\n"
         "- View detailed group statistics\n"
         "- MongoDB database for reliable storage\n\n"
@@ -1023,6 +1099,12 @@ application.add_handler(MessageHandler(
 application.add_handler(MessageHandler(
     filters.ChatType.PRIVATE & ~filters.COMMAND,
     handle_private_message
+))
+
+# Handle edited private messages from owner
+application.add_handler(MessageHandler(
+    filters.ChatType.PRIVATE & filters.Update.EDITED_MESSAGE,
+    handle_private_edit
 ))
 
 # Handle ONLY group messages that are replies to bot OR mention the bot
