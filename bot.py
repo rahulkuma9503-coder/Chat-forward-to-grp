@@ -843,9 +843,9 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
     user_id = update.message_reaction.user.id
     chat_id = update.message_reaction.chat.id
     message_id = update.message_reaction.message_id
-    new_reactions = update.message_reaction.new_reactions
+    new_reaction = update.message_reaction.new_reaction  # Fixed: singular 'new_reaction'
     
-    logger.info(f"🔔 Reaction detected: User {user_id}, Chat {chat_id}, Message {message_id}, Reactions: {new_reactions}")
+    logger.info(f"🔔 Reaction detected: User {user_id}, Chat {chat_id}, Message {message_id}, Reactions: {new_reaction}")
     
     # Handle reactions in private chat (from owner)
     if update.message_reaction.chat.type == "private":
@@ -865,7 +865,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.set_message_reaction(
                     chat_id=group_id,
                     message_id=group_message_id,
-                    reaction=new_reactions
+                    reaction=new_reaction  # Fixed: singular 'new_reaction'
                 )
                 logger.info(f"✅ Mirrored reaction from private to group reply: {group_id}_{group_message_id}")
                 update_stats(user_id, "reaction_handled")
@@ -890,7 +890,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                     await context.bot.set_message_reaction(
                         chat_id=group_id,
                         message_id=group_message_id,
-                        reaction=new_reactions
+                        reaction=new_reaction  # Fixed: singular 'new_reaction'
                     )
                     logger.info(f"✅ Mirrored reaction from private to group message: {group_id}_{group_message_id}")
                     update_stats(user_id, "reaction_handled")
@@ -924,7 +924,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.set_message_reaction(
                     chat_id=mapping["private_chat_id"],
                     message_id=mapping["private_message_id"],
-                    reaction=new_reactions
+                    reaction=new_reaction  # Fixed: singular 'new_reaction'
                 )
                 logger.info(f"✅ Mirrored reaction from group reply to private: {reaction_key}")
                 update_stats(int(OWNER_ID), "reaction_handled")
@@ -941,7 +941,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.set_message_reaction(
                     chat_id=mapping["private_chat_id"],
                     message_id=mapping["private_message_id"],
-                    reaction=new_reactions
+                    reaction=new_reaction  # Fixed: singular 'new_reaction'
                 )
                 logger.info(f"✅ Mirrored reaction from group to private: {group_key}")
                 update_stats(int(OWNER_ID), "reaction_handled")
@@ -951,7 +951,6 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
         
         if not reaction_mirrored:
             logger.warning(f"⚠️ No mapping found for group message {chat_id}_{message_id}")
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     # Ignore group messages completely
