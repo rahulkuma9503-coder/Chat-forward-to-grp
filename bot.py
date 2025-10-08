@@ -1101,9 +1101,9 @@ application.add_handler(MessageHandler(
     handle_private_message
 ))
 
-# Handle edited private messages from owner
+# Handle edited private messages from owner - FIXED FILTER
 application.add_handler(MessageHandler(
-    filters.ChatType.PRIVATE & filters.Update.EDITED_MESSAGE,
+    filters.ChatType.PRIVATE & filters.TEXT & filters.UpdateType.EDITED_MESSAGE,
     handle_private_edit
 ))
 
