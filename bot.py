@@ -114,33 +114,31 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         original_private_msg = update.message.reply_to_message
         
         # Check if this was a forwarded group message that has mapping
-        if (original_private_msg.message_id in message_mappings and 
-            original_private_msg.forward_from_message_id):
+        if original_private_msg.message_id in message_mappings:
             
             mapping = message_mappings[original_private_msg.message_id]
-            original_group_msg_id = mapping['group_message_id']
+            original_group_msg_id = mapping['original_group_message_id']
             original_sender = mapping['sender']
             
             try:
                 # Get user mention for tagging
                 user_mention = get_user_mention(original_sender)
                 
-                # Send reply back to the group as a reply to the original message with user tagging
+                # Send reply back to the group as a reply to the original user's message
                 if update.message.sticker:
-                    # For stickers, send a text message first mentioning the user, then the sticker
-                    sent_msg = await context.bot.send_message(
+                    # Send the mention first, then the sticker as a reply to the mention
+                    mention_msg = await context.bot.send_message(
                         chat_id=group_id,
                         text=f"👤 {user_mention}",
-                        reply_to_message_id=original_group_msg_id,
                         parse_mode='HTML'
                     )
                     await context.bot.send_sticker(
                         chat_id=group_id,
                         sticker=update.message.sticker.file_id,
-                        reply_to_message_id=sent_msg.message_id
+                        reply_to_message_id=original_group_msg_id
                     )
                 elif update.message.text:
-                    # For text messages, include the mention in the response
+                    # For text messages, send directly as reply with mention
                     await context.bot.send_message(
                         chat_id=group_id,
                         text=f"👤 {user_mention}\n{update.message.text}",
@@ -148,8 +146,8 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                         parse_mode='HTML'
                     )
                 else:
-                    # For other media types, send the mention first, then the media
-                    sent_msg = await context.bot.send_message(
+                    # For other media types
+                    mention_msg = await context.bot.send_message(
                         chat_id=group_id,
                         text=f"👤 {user_mention}",
                         reply_to_message_id=original_group_msg_id,
@@ -159,7 +157,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                         chat_id=group_id,
                         from_chat_id=update.message.chat_id,
                         message_id=update.message.message_id,
-                        reply_to_message_id=sent_msg.message_id
+                        reply_to_message_id=original_group_msg_id
                     )
                 
                 await update.message.reply_text("✅ Your response has been sent to the group!")
@@ -167,7 +165,8 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             except Exception as e:
                 logger.error(f"Failed to send reply to group: {e}")
                 await update.message.reply_text(
-                    "❌ Failed to send response. Make sure:\n"
+                    f"❌ Failed to send response: {str(e)}\n"
+                    "Make sure:\n"
                     "1. I'm still in the group\n"
                     "2. I have 'Send Messages' permission\n"
                     "3. The original message still exists"
@@ -226,9 +225,9 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 message_id=update.message.message_id
             )
             
-            # Store mapping for reply functionality (including full user object)
+            # Store mapping for reply functionality - store the ORIGINAL group message ID (the user's reply)
             message_mappings[forwarded_msg.message_id] = {
-                'group_message_id': update.message.message_id,
+                'original_group_message_id': update.message.message_id,  # This is the user's reply message ID in group
                 'sender': update.message.from_user,
                 'group_id': group_id
             }
@@ -236,7 +235,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             # Send info message to owner with user mention
             user_mention = get_user_mention(update.message.from_user)
             
-            await context.bot.send_message(
+            info_msg = await context.bot.send_message(
                 chat_id=OWNER_ID,
                 text=f"💬 Reply from {user_mention} in group.\n"
                      f"📝 You can reply to this message to respond to them!\n"
