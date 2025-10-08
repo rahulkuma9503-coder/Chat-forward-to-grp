@@ -771,10 +771,15 @@ async def handle_private_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Check if this edited message has group mappings
     edit_key = f"{private_chat_id}_{private_message_id}"
     
+    logger.info(f"🔍 Checking edit mappings for key: {edit_key}")
+    logger.info(f"🔍 Available edit keys: {list(edit_mappings.keys())}")
+    
     if edit_key in edit_mappings:
         group_messages = edit_mappings[edit_key]
         successful_edits = 0
         failed_edits = []
+        
+        logger.info(f"🔍 Found {len(group_messages)} group messages to edit")
         
         for group_msg in group_messages:
             group_id = group_msg["group_id"]
@@ -801,11 +806,25 @@ async def handle_private_edit(update: Update, context: ContextTypes.DEFAULT_TYPE
         if successful_edits > 0:
             update_stats(user_id, "edit_handled")
             logger.info(f"✅ Successfully edited {successful_edits} group message(s)")
+            
+            # Send confirmation to owner
+            await context.bot.send_message(
+                chat_id=private_chat_id,
+                text=f"✅ Message updated in {successful_edits} group(s)!"
+            )
         
         if failed_edits:
             logger.warning(f"❌ Failed to edit {len(failed_edits)} group message(s): {failed_edits}")
+            await context.bot.send_message(
+                chat_id=private_chat_id,
+                text=f"❌ Failed to update message in {len(failed_edits)} group(s)"
+            )
     else:
         logger.info(f"ℹ️ No edit mapping found for private message: {edit_key}")
+        await context.bot.send_message(
+            chat_id=private_chat_id,
+            text="❌ No edit mapping found for this message. Only messages sent through the bot can be edited."
+        )
 
 async def handle_bot_related_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle ONLY messages in connected groups that are replies to bot OR mention the bot"""
@@ -1101,9 +1120,9 @@ application.add_handler(MessageHandler(
     handle_private_message
 ))
 
-# Handle edited private messages from owner - FIXED FILTER
+# Handle edited private messages from owner - SIMPLIFIED FILTER
 application.add_handler(MessageHandler(
-    filters.ChatType.PRIVATE & filters.TEXT & filters.UpdateType.EDITED_MESSAGE,
+    filters.ChatType.PRIVATE & filters.TEXT,
     handle_private_edit
 ))
 
