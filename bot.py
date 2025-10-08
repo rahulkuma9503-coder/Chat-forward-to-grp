@@ -794,6 +794,25 @@ async def handle_bot_related_group_messages(update: Update, context: ContextType
         if update.message.from_user.username:
             user_name = f"@{update.message.from_user.username}"
         
+        # If this is a reply to bot's message, first forward the message that was replied to
+        if update.message.reply_to_message and update.message.reply_to_message.from_user.id == bot_id:
+            try:
+                # Forward the message that was replied to (for context)
+                replied_msg = await context.bot.forward_message(
+                    chat_id=OWNER_ID,
+                    from_chat_id=group_id,
+                    message_id=update.message.reply_to_message.message_id
+                )
+                
+                # Add a context message to show this is what the user replied to
+                await context.bot.send_message(
+                    chat_id=OWNER_ID,
+                    text=f"↩️ **User replied to this message:**",
+                    reply_to_message_id=replied_msg.message_id
+                )
+            except Exception as e:
+                logger.error(f"Failed to forward replied-to message: {e}")
+        
         # Forward the actual message that the user sent in the group
         forwarded_msg = await context.bot.forward_message(
             chat_id=OWNER_ID,
