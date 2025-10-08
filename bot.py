@@ -794,23 +794,7 @@ async def handle_bot_related_group_messages(update: Update, context: ContextType
         if update.message.from_user.username:
             user_name = f"@{update.message.from_user.username}"
         
-        # Create a formatted message with context
-        context_message = (
-            f"🔔 **Bot Mention/Reply in {group_name}**\n\n"
-            f"👤 **From:** {user_name}\n"
-            f"📝 **Reason:** {reason}\n"
-            f"🏷️ **Group:** {group_name}\n\n"
-            "👇 **Message:**"
-        )
-        
-        # First send the context message
-        context_msg = await context.bot.send_message(
-            chat_id=OWNER_ID,
-            text=context_message,
-            parse_mode='Markdown'
-        )
-        
-        # Then forward the actual message as a reply to the context message
+        # Forward the actual message that the user sent in the group
         forwarded_msg = await context.bot.forward_message(
             chat_id=OWNER_ID,
             from_chat_id=group_id,
@@ -843,7 +827,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
     user_id = update.message_reaction.user.id
     chat_id = update.message_reaction.chat.id
     message_id = update.message_reaction.message_id
-    new_reaction = update.message_reaction.new_reaction  # Fixed: singular 'new_reaction'
+    new_reaction = update.message_reaction.new_reaction
     
     logger.info(f"🔔 Reaction detected: User {user_id}, Chat {chat_id}, Message {message_id}, Reactions: {new_reaction}")
     
@@ -865,7 +849,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.set_message_reaction(
                     chat_id=group_id,
                     message_id=group_message_id,
-                    reaction=new_reaction  # Fixed: singular 'new_reaction'
+                    reaction=new_reaction
                 )
                 logger.info(f"✅ Mirrored reaction from private to group reply: {group_id}_{group_message_id}")
                 update_stats(user_id, "reaction_handled")
@@ -890,7 +874,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                     await context.bot.set_message_reaction(
                         chat_id=group_id,
                         message_id=group_message_id,
-                        reaction=new_reaction  # Fixed: singular 'new_reaction'
+                        reaction=new_reaction
                     )
                     logger.info(f"✅ Mirrored reaction from private to group message: {group_id}_{group_message_id}")
                     update_stats(user_id, "reaction_handled")
@@ -924,7 +908,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.set_message_reaction(
                     chat_id=mapping["private_chat_id"],
                     message_id=mapping["private_message_id"],
-                    reaction=new_reaction  # Fixed: singular 'new_reaction'
+                    reaction=new_reaction
                 )
                 logger.info(f"✅ Mirrored reaction from group reply to private: {reaction_key}")
                 update_stats(int(OWNER_ID), "reaction_handled")
@@ -941,7 +925,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.set_message_reaction(
                     chat_id=mapping["private_chat_id"],
                     message_id=mapping["private_message_id"],
-                    reaction=new_reaction  # Fixed: singular 'new_reaction'
+                    reaction=new_reaction
                 )
                 logger.info(f"✅ Mirrored reaction from group to private: {group_key}")
                 update_stats(int(OWNER_ID), "reaction_handled")
@@ -951,6 +935,7 @@ async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_
         
         if not reaction_mirrored:
             logger.warning(f"⚠️ No mapping found for group message {chat_id}_{message_id}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     # Ignore group messages completely
