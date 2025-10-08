@@ -405,7 +405,7 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Connected to {group_type}: {group_name} (ID: {group_id})!\n\n"
             "🔄 Features:\n"
             "- Send any message and select groups to send to\n"
-            "- When someone replies to my messages, I'll forward them to you\n"
+            "- When someone replies to ANY message in connected groups, I'll forward them to you\n"
             "- Reply to those messages and I'll send your response back!\n"
             "- React to messages and I'll mirror reactions in groups\n"
             "- Use /stats to see all connected groups\n"
@@ -731,50 +731,60 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         parse_mode='Markdown'
     )
 
-async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming group messages (only replies to bot's messages)"""
-    # Only process replies to the bot's messages
+async def handle_all_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle ALL messages in connected groups (including replies to any message)"""
+    # Only process messages in connected groups
+    group_id = update.message.chat.id
+    
+    # Get owner's connections to verify this is a connected group
+    owner_connections = get_all_connections(int(OWNER_ID))
+    if group_id not in owner_connections:
+        return
+    
+    # Only process messages that are replies (to any message, not just bot's messages)
     if not update.message.reply_to_message:
         return
     
-    # Check if the replied-to message is from the bot
-    if (update.message.reply_to_message and 
-        update.message.reply_to_message.from_user and 
-        update.message.reply_to_message.from_user.id == context.bot.id):
+    user_id = update.message.from_user.id
+    group_name = owner_connections[group_id]['name']
+    
+    try:
+        # Forward the group reply to the owner with mapping information
+        forwarded_msg = await context.bot.forward_message(
+            chat_id=OWNER_ID,
+            from_chat_id=group_id,
+            message_id=update.message.message_id
+        )
         
-        user_id = update.message.from_user.id
-        group_id = update.message.chat.id
+        # Store mapping for reply functionality
+        message_mappings[forwarded_msg.message_id] = {
+            'original_group_message_id': update.message.message_id,
+            'sender': update.message.from_user,
+            'group_id': group_id
+        }
         
-        # Get owner's connections to verify this is a connected group
-        owner_connections = get_all_connections(int(OWNER_ID))
-        if group_id not in owner_connections:
-            return
+        # Also store for reactions - group reply to private forwarded message
+        reaction_mappings[f"{group_id}_{update.message.message_id}"] = {
+            "private_chat_id": OWNER_ID,
+            "private_message_id": forwarded_msg.message_id
+        }
         
-        try:
-            # Forward the group reply to the owner with mapping information
-            forwarded_msg = await context.bot.forward_message(
-                chat_id=OWNER_ID,
-                from_chat_id=group_id,
-                message_id=update.message.message_id
-            )
-            
-            # Store mapping for reply functionality
-            message_mappings[forwarded_msg.message_id] = {
-                'original_group_message_id': update.message.message_id,
-                'sender': update.message.from_user,
-                'group_id': group_id
-            }
-            
-            # Also store for reactions - group reply to private forwarded message
-            reaction_mappings[f"{group_id}_{update.message.message_id}"] = {
-                "private_chat_id": OWNER_ID,
-                "private_message_id": forwarded_msg.message_id
-            }
-            
-            logger.info(f"📝 Stored group reply mapping: {group_id}_{update.message.message_id} -> {OWNER_ID}_{forwarded_msg.message_id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to forward group reply to owner: {e}")
+        # Get info about who sent the reply
+        user_name = update.message.from_user.first_name
+        if update.message.from_user.username:
+            user_name = f"@{update.message.from_user.username}"
+        
+        # Get info about the replied-to message
+        replied_to_user = "Unknown"
+        if update.message.reply_to_message.from_user:
+            replied_to_user = update.message.reply_to_message.from_user.first_name
+            if update.message.reply_to_message.from_user.username:
+                replied_to_user = f"@{update.message.reply_to_message.from_user.username}"
+        
+        logger.info(f"📩 Forwarded group reply from {user_name} in {group_name} (replying to {replied_to_user})")
+        
+    except Exception as e:
+        logger.error(f"Failed to forward group reply to owner: {e}")
 
 async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle message reactions in both private and group chats"""
@@ -920,8 +930,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /botstats - Detailed bot statistics and analytics\n\n"
         "🔄 Features:\n"
         "- Send messages and select specific groups to send to\n"
-        "- Reply to group messages and bot will respond\n"
-        "- React to messages and bot will mirror reactions\n"
+        "- When someone replies to ANY message in connected groups, I'll forward them to you\n"
+        "- Reply to those messages and I'll send your response back!\n"
+        "- React to messages and I'll mirror reactions in groups\n"
         "- View detailed group statistics\n"
         "- MongoDB database for reliable storage\n\n"
         "⚠️ Note: Only you (the owner) can use this bot."
@@ -968,10 +979,10 @@ application.add_handler(MessageHandler(
     handle_private_message
 ))
 
-# Handle group messages that are replies to bot's messages
+# Handle ALL group messages that are replies (to any message, not just bot's messages)
 application.add_handler(MessageHandler(
     filters.ChatType.GROUPS & filters.REPLY & ~filters.COMMAND,
-    handle_group_message
+    handle_all_group_messages
 ))
 
 # Handle message reactions with dedicated handler
