@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 # Create Flask app
 app = Flask(__name__)
 
+# Store message mappings for reply functionality
+message_mappings = {}
+
 @app.route('/')
 def health_check():
     return "🤖 Bot is running! Only the owner can use me.", 200
@@ -69,17 +72,16 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_connection(update.message.from_user.id, group_id)
         await update.message.reply_text(
             f"✅ Connected to group {group_id}!\n"
-            "Send any message to me (in private) and I'll forward it there."
+            "Send any message to me (in private) and I'll forward it there.\n\n"
+            "🔄 New Feature: When someone replies to my messages in the group, "
+            "I'll forward those replies to you. You can then reply to those "
+            "messages and I'll send your response back to the same person in the group!"
         )
     except ValueError:
         await update.message.reply_text("Invalid group ID. Must be an integer.")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages"""
-    # Ignore group messages completely
-    if update.message.chat.type != "private":
-        return
-    
+async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming private messages from owner"""
     # Owner check
     if not is_owner(update.message.from_user.id):
         await update.message.reply_text("❌ You are not authorized to use this bot.")
@@ -95,6 +97,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # Check if this is a reply to a forwarded group message
+    if update.message.reply_to_message:
+        original_private_msg = update.message.reply_to_message
+        
+        # Check if this was a forwarded group message that has mapping
+        if (original_private_msg.message_id in message_mappings and 
+            original_private_msg.forward_from_message_id):
+            
+            mapping = message_mappings[original_private_msg.message_id]
+            original_group_msg_id = mapping['group_message_id']
+            original_sender_id = mapping['sender_id']
+            
+            try:
+                # Send reply back to the group as a reply to the original message
+                if update.message.sticker:
+                    sent_msg = await context.bot.send_message(
+                        chat_id=group_id,
+                        text=f"👤 Response from admin:",
+                        reply_to_message_id=original_group_msg_id
+                    )
+                    await context.bot.send_sticker(
+                        chat_id=group_id,
+                        sticker=update.message.sticker.file_id,
+                        reply_to_message_id=sent_msg.message_id
+                    )
+                elif update.message.text:
+                    await context.bot.send_message(
+                        chat_id=group_id,
+                        text=f"👤 Response from admin:\n{update.message.text}",
+                        reply_to_message_id=original_group_msg_id
+                    )
+                else:
+                    # For other media types, send the media with a caption
+                    sent_msg = await context.bot.send_message(
+                        chat_id=group_id,
+                        text=f"👤 Response from admin:",
+                        reply_to_message_id=original_group_msg_id
+                    )
+                    await context.bot.copy_message(
+                        chat_id=group_id,
+                        from_chat_id=update.message.chat_id,
+                        message_id=update.message.message_id,
+                        reply_to_message_id=sent_msg.message_id
+                    )
+                
+                await update.message.reply_text("✅ Your response has been sent to the group!")
+                
+            except Exception as e:
+                logger.error(f"Failed to send reply to group: {e}")
+                await update.message.reply_text(
+                    "❌ Failed to send response. Make sure:\n"
+                    "1. I'm still in the group\n"
+                    "2. I have 'Send Messages' permission\n"
+                    "3. The original message still exists"
+                )
+            return
+    
+    # Normal message forwarding (not a reply)
     try:
         # Handle stickers specifically
         if update.message.sticker:
@@ -119,6 +179,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "4. Try reconnecting with /connect"
         )
 
+async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming group messages (only replies to bot's messages)"""
+    # Only process replies to the bot's messages
+    if not update.message.reply_to_message:
+        return
+    
+    # Check if the replied-to message is from the bot
+    if (update.message.reply_to_message and 
+        update.message.reply_to_message.from_user and 
+        update.message.reply_to_message.from_user.id == context.bot.id):
+        
+        user_id = update.message.from_user.id
+        group_id = update.message.chat.id
+        
+        # Get owner's connection to verify this is the connected group
+        owner_connection = get_connection(int(OWNER_ID))
+        if owner_connection != group_id:
+            return
+        
+        try:
+            # Forward the group reply to the owner with mapping information
+            forwarded_msg = await context.bot.forward_message(
+                chat_id=OWNER_ID,
+                from_chat_id=group_id,
+                message_id=update.message.message_id
+            )
+            
+            # Store mapping for reply functionality
+            message_mappings[forwarded_msg.message_id] = {
+                'group_message_id': update.message.message_id,
+                'sender_id': user_id,
+                'group_id': group_id
+            }
+            
+            # Send info message to owner
+            user_name = update.message.from_user.first_name
+            if update.message.from_user.username:
+                user_name = f"@{update.message.from_user.username}"
+            
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"💬 Reply from {user_name} in group.\n"
+                     f"📝 You can reply to this message to respond to them!",
+                reply_to_message_id=forwarded_msg.message_id
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to forward group reply to owner: {e}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     # Ignore group messages completely
@@ -133,6 +242,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Owner-Only Forward Bot is running!\n"
         "Use /connect <group_id> to start forwarding messages\n\n"
+        "🔄 New Feature:\n"
+        "- When someone replies to my messages in group, I'll forward them to you\n"
+        "- Reply to those messages and I'll send your response back!\n\n"
         "⚠️ Note: Only you (the owner) can use this bot."
     )
 
@@ -140,10 +252,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("connect", connect_command))
 
-# Handle all non-command messages
+# Handle private messages from owner
 application.add_handler(MessageHandler(
-    filters.ALL & ~filters.COMMAND,
-    handle_message
+    filters.ChatType.PRIVATE & ~filters.COMMAND,
+    handle_private_message
+))
+
+# Handle group messages that are replies to bot's messages
+application.add_handler(MessageHandler(
+    filters.ChatType.GROUPS & filters.REPLY & ~filters.COMMAND,
+    handle_group_message
 ))
 
 def start_bot():
