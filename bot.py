@@ -48,6 +48,8 @@ except Exception as e:
 
 # Store message mappings for reply functionality
 message_mappings = {}
+# Store reaction mappings
+reaction_mappings = {}
 # Store active connections and group info
 active_groups = {}
 
@@ -127,7 +129,8 @@ def update_stats(owner_id: int, action: str):
         "messages_sent": 1 if action == "message_sent" else 0,
         "connections_added": 1 if action == "connection_added" else 0,
         "connections_removed": 1 if action == "connection_removed" else 0,
-        "replies_handled": 1 if action == "reply_handled" else 0
+        "replies_handled": 1 if action == "reply_handled" else 0,
+        "reactions_handled": 1 if action == "reaction_handled" else 0
     }
     
     stats_collection.update_one(
@@ -164,7 +167,8 @@ def get_bot_stats(owner_id: int):
             "total_messages": {"$sum": "$messages_sent"},
             "total_replies": {"$sum": "$replies_handled"},
             "total_connections_added": {"$sum": "$connections_added"},
-            "total_connections_removed": {"$sum": "$connections_removed"}
+            "total_connections_removed": {"$sum": "$connections_removed"},
+            "total_reactions": {"$sum": "$reactions_handled"}
         }}
     ]
     
@@ -230,6 +234,7 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "- Send any message to me and I'll forward it to all connected groups\n"
             "- When someone replies to my messages, I'll forward them to you\n"
             "- Reply to those messages and I'll send your response back!\n"
+            "- React to messages and I'll mirror reactions in groups\n"
             "- Use /stats to see all connected groups\n"
             "- Use /disconnect <group_id> to remove a group\n"
             "- Use /botstats for detailed statistics"
@@ -385,6 +390,7 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stats['all_time']:
         message += f"• Total Messages Sent: `{stats['all_time'].get('total_messages', 0)}`\n"
         message += f"• Total Replies Handled: `{stats['all_time'].get('total_replies', 0)}`\n"
+        message += f"• Total Reactions Handled: `{stats['all_time'].get('total_reactions', 0)}`\n"
         message += f"• Total Connections Added: `{stats['all_time'].get('total_connections_added', 0)}`\n"
         message += f"• Total Connections Removed: `{stats['all_time'].get('total_connections_removed', 0)}`\n"
     
@@ -393,6 +399,7 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stats['today']:
         message += f"• Messages Sent: `{stats['today'].get('messages_sent', 0)}`\n"
         message += f"• Replies Handled: `{stats['today'].get('replies_handled', 0)}`\n"
+        message += f"• Reactions Handled: `{stats['today'].get('reactions_handled', 0)}`\n"
         message += f"• Connections Added: `{stats['today'].get('connections_added', 0)}`\n"
         message += f"• Connections Removed: `{stats['today'].get('connections_removed', 0)}`\n"
     else:
@@ -554,28 +561,83 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 message_id=update.message.message_id
             )
             
-            # Store mapping for reply functionality
+            # Store mapping for reply functionality (NO INFO MESSAGE)
             message_mappings[forwarded_msg.message_id] = {
                 'original_group_message_id': update.message.message_id,
                 'sender': update.message.from_user,
                 'group_id': group_id
             }
             
-            # Send info message to owner
-            group_name = owner_connections[group_id]['name']
-            user_name = update.message.from_user.first_name
-            if update.message.from_user.username:
-                user_name = f"@{update.message.from_user.username}"
-            
-            info_msg = await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=f"💬 Reply from {user_name} in {group_name}.\n"
-                     f"📝 Reply to this message to respond to them directly!",
-                reply_to_message_id=forwarded_msg.message_id
-            )
+            # No info message - just the forwarded message
             
         except Exception as e:
             logger.error(f"Failed to forward group reply to owner: {e}")
+
+async def handle_message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle message reactions in both private and group chats"""
+    if not update.message_reaction:
+        return
+    
+    user_id = update.message_reaction.user.id
+    chat_id = update.message_reaction.chat.id
+    message_id = update.message_reaction.message_id
+    new_reactions = update.message_reaction.new_reaction
+    
+    # Handle reactions in private chat (from owner)
+    if update.message_reaction.chat.type == "private":
+        if not is_owner(user_id):
+            return
+        
+        # Check if this is a reaction to a forwarded group message
+        if message_id in message_mappings:
+            mapping = message_mappings[message_id]
+            group_id = mapping['group_id']
+            group_message_id = mapping['original_group_message_id']
+            
+            try:
+                # Set the same reaction in the group
+                for reaction in new_reactions:
+                    await context.bot.set_message_reaction(
+                        chat_id=group_id,
+                        message_id=group_message_id,
+                        reaction=[reaction]
+                    )
+                
+                # Store reaction mapping for group reactions
+                reaction_mappings[f"{group_id}_{group_message_id}"] = message_id
+                update_stats(user_id, "reaction_handled")
+                
+            except Exception as e:
+                logger.error(f"Failed to set reaction in group: {e}")
+    
+    # Handle reactions in group (from users to bot's messages)
+    elif update.message_reaction.chat.type in ["group", "supergroup"]:
+        # Check if this is a reaction to a message sent by the bot
+        try:
+            message = await context.bot.get_message(chat_id, message_id)
+            if message.from_user and message.from_user.id == context.bot.id:
+                # This is a reaction to bot's message in group
+                owner_connections = get_all_connections(int(OWNER_ID))
+                if chat_id not in owner_connections:
+                    return
+                
+                # Find the corresponding private message
+                private_msg_id = reaction_mappings.get(f"{chat_id}_{message_id}")
+                if private_msg_id:
+                    try:
+                        # Set the same reaction in private chat
+                        for reaction in new_reactions:
+                            await context.bot.set_message_reaction(
+                                chat_id=OWNER_ID,
+                                message_id=private_msg_id,
+                                reaction=[reaction]
+                            )
+                        update_stats(user_id, "reaction_handled")
+                    except Exception as e:
+                        logger.error(f"Failed to set reaction in private chat: {e}")
+                
+        except Exception as e:
+            logger.error(f"Failed to handle group reaction: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
@@ -599,6 +661,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Connect to multiple groups simultaneously\n"
         "- Messages are forwarded to ALL connected groups\n"
         "- Reply to group messages and bot will respond\n"
+        "- React to messages and bot will mirror reactions\n"
         "- View detailed group statistics\n"
         "- MongoDB database for reliable storage\n\n"
         "⚠️ Note: Only you (the owner) can use this bot."
@@ -648,12 +711,18 @@ application.add_handler(MessageHandler(
     handle_group_message
 ))
 
+# Handle message reactions
+application.add_handler(MessageHandler(
+    filters.ALL,
+    handle_message_reaction
+))
+
 def start_bot():
     """Start Telegram bot in polling mode"""
     logger.info("Starting Telegram bot in polling mode...")
     logger.info(f"Owner ID: {OWNER_ID}")
     logger.info(f"MongoDB URI: {MONGO_URI}")
-    application.run_polling()
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     # Start Flask in a background thread
