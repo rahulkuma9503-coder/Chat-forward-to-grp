@@ -11,11 +11,13 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
-from storage import save_connection, get_connection, remove_connection, get_all_connections
+from pymongo import MongoClient
+from datetime import datetime
 
 # Configuration
 TOKEN = os.getenv("TOKEN")
 OWNER_ID = os.getenv("OWNER_ID", "OWNER_IDD")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 if not TOKEN:
     raise ValueError("Missing TOKEN environment variable")
 if not OWNER_ID:
@@ -30,6 +32,12 @@ logger = logging.getLogger(__name__)
 
 # Create Flask app
 app = Flask(__name__)
+
+# MongoDB setup
+client = MongoClient(MONGO_URI)
+db = client.telegram_bot
+connections_collection = db.connections
+stats_collection = db.stats
 
 # Store message mappings for reply functionality
 message_mappings = {}
@@ -51,6 +59,113 @@ application = Application.builder().token(TOKEN).build()
 def is_owner(user_id: int) -> bool:
     """Check if user is the owner"""
     return str(user_id) == OWNER_ID
+
+# MongoDB Storage Functions
+def save_connection(owner_id: int, group_id: int, group_name: str, group_username: str = ""):
+    """Save connection to MongoDB"""
+    connection_data = {
+        "owner_id": owner_id,
+        "group_id": group_id,
+        "group_name": group_name,
+        "group_username": group_username,
+        "connected_at": datetime.utcnow(),
+        "is_active": True
+    }
+    
+    # Update or insert
+    connections_collection.update_one(
+        {"owner_id": owner_id, "group_id": group_id},
+        {"$set": connection_data},
+        upsert=True
+    )
+    
+    # Update stats
+    update_stats(owner_id, "connection_added")
+
+def remove_connection(owner_id: int, group_id: int):
+    """Remove connection from MongoDB"""
+    result = connections_collection.update_one(
+        {"owner_id": owner_id, "group_id": group_id},
+        {"$set": {"is_active": False, "disconnected_at": datetime.utcnow()}}
+    )
+    
+    if result.modified_count > 0:
+        update_stats(owner_id, "connection_removed")
+        return True
+    return False
+
+def get_all_connections(owner_id: int):
+    """Get all active connections for owner"""
+    connections = {}
+    cursor = connections_collection.find({
+        "owner_id": owner_id,
+        "is_active": True
+    })
+    
+    for doc in cursor:
+        connections[doc["group_id"]] = {
+            "name": doc["group_name"],
+            "username": doc.get("group_username", ""),
+            "connected_at": doc.get("connected_at")
+        }
+    
+    return connections
+
+def update_stats(owner_id: int, action: str):
+    """Update statistics in MongoDB"""
+    today = datetime.utcnow().date()
+    
+    stats_collection.update_one(
+        {
+            "owner_id": owner_id,
+            "date": today
+        },
+        {
+            "$inc": {
+                "messages_sent": 1 if action == "message_sent" else 0,
+                "connections_added": 1 if action == "connection_added" else 0,
+                "connections_removed": 1 if action == "connection_removed" else 0,
+                "replies_handled": 1 if action == "reply_handled" else 0
+            }
+        },
+        upsert=True
+    )
+
+def get_bot_stats(owner_id: int):
+    """Get comprehensive bot statistics"""
+    # Total connections
+    total_connections = connections_collection.count_documents({
+        "owner_id": owner_id,
+        "is_active": True
+    })
+    
+    # Today's stats
+    today = datetime.utcnow().date()
+    today_stats = stats_collection.find_one({
+        "owner_id": owner_id,
+        "date": today
+    }) or {}
+    
+    # All-time stats
+    pipeline = [
+        {"$match": {"owner_id": owner_id}},
+        {"$group": {
+            "_id": None,
+            "total_messages": {"$sum": "$messages_sent"},
+            "total_replies": {"$sum": "$replies_handled"},
+            "total_connections_added": {"$sum": "$connections_added"},
+            "total_connections_removed": {"$sum": "$connections_removed"}
+        }}
+    ]
+    
+    all_time_stats = list(stats_collection.aggregate(pipeline))
+    all_time_stats = all_time_stats[0] if all_time_stats else {}
+    
+    return {
+        "total_connections": total_connections,
+        "today": today_stats,
+        "all_time": all_time_stats
+    }
 
 # Command handlers
 async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -78,6 +193,7 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat = await context.bot.get_chat(group_id)
             group_name = chat.title
             group_type = "Supergroup" if chat.type == "supergroup" else "Group"
+            group_username = f"@{chat.username}" if chat.username else ""
         except Exception as e:
             await update.message.reply_text(
                 f"❌ Cannot access group {group_id}. Make sure:\n"
@@ -88,13 +204,14 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        save_connection(update.message.from_user.id, group_id, group_name)
+        save_connection(update.message.from_user.id, group_id, group_name, group_username)
         
         # Store in active groups cache
         active_groups[group_id] = {
             'name': group_name,
             'type': group_type,
-            'member_count': getattr(chat, 'member_count', 'Unknown')
+            'member_count': getattr(chat, 'member_count', 'Unknown'),
+            'username': group_username
         }
         
         await update.message.reply_text(
@@ -104,7 +221,8 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "- When someone replies to my messages, I'll forward them to you\n"
             "- Reply to those messages and I'll send your response back!\n"
             "- Use /stats to see all connected groups\n"
-            "- Use /disconnect <group_id> to remove a group"
+            "- Use /disconnect <group_id> to remove a group\n"
+            "- Use /botstats for detailed statistics"
         )
     except ValueError:
         await update.message.reply_text("Invalid group ID. Must be an integer.")
@@ -128,8 +246,8 @@ async def disconnect_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         
         message = "📋 Your Connected Groups:\n\n"
-        for group_id, group_name in connections.items():
-            message += f"• {group_name} (ID: {group_id})\n"
+        for group_id, group_info in connections.items():
+            message += f"• {group_info['name']} (ID: {group_id})\n"
         
         message += "\nTo disconnect from a group, use: /disconnect <group_id>"
         await update.message.reply_text(message)
@@ -143,14 +261,17 @@ async def disconnect_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"❌ You are not connected to group {group_id}!")
             return
         
-        group_name = connections[group_id]
-        remove_connection(update.message.from_user.id, group_id)
+        group_name = connections[group_id]['name']
+        success = remove_connection(update.message.from_user.id, group_id)
         
-        # Remove from active groups cache
-        if group_id in active_groups:
-            del active_groups[group_id]
-        
-        await update.message.reply_text(f"✅ Disconnected from group: {group_name} (ID: {group_id})")
+        if success:
+            # Remove from active groups cache
+            if group_id in active_groups:
+                del active_groups[group_id]
+            
+            await update.message.reply_text(f"✅ Disconnected from group: {group_name} (ID: {group_id})")
+        else:
+            await update.message.reply_text(f"❌ Failed to disconnect from group {group_id}")
         
     except ValueError:
         await update.message.reply_text("Invalid group ID. Must be an integer.")
@@ -170,12 +291,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ You are not connected to any groups!")
         return
     
-    message = "📊 Bot Statistics & Connected Groups\n\n"
+    message = "📊 Connected Groups\n\n"
     total_groups = len(connections)
     message += f"📈 Total Groups Connected: {total_groups}\n\n"
     
     # Get fresh info for each group
-    for group_id, group_name in connections.items():
+    for group_id, group_info in connections.items():
         try:
             # Try to get updated group info
             chat = await context.bot.get_chat(group_id)
@@ -183,8 +304,25 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             group_type = "Supergroup" if chat.type == "supergroup" else "Group"
             username = f"@{chat.username}" if chat.username else "No username"
             
+            # Update cache and database with fresh info
+            active_groups[group_id] = {
+                'name': chat.title,
+                'type': group_type,
+                'member_count': member_count,
+                'username': username
+            }
+            
+            # Update database with fresh info
+            connections_collection.update_one(
+                {"owner_id": update.message.from_user.id, "group_id": group_id},
+                {"$set": {
+                    "group_name": chat.title,
+                    "group_username": username
+                }}
+            )
+            
             message += (
-                f"🏷️ **{group_name}**\n"
+                f"🏷️ **{chat.title}**\n"
                 f"   📝 Type: {group_type}\n"
                 f"   🆔 ID: `{group_id}`\n"
                 f"   👥 Members: {member_count}\n"
@@ -192,35 +330,76 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"   ➖ /disconnect_{group_id}\n\n"
             )
             
-            # Update cache
-            active_groups[group_id] = {
-                'name': group_name,
-                'type': group_type,
-                'member_count': member_count,
-                'username': username
-            }
-            
         except Exception as e:
             # Use cached info if available
             if group_id in active_groups:
-                group_info = active_groups[group_id]
+                group_data = active_groups[group_id]
                 message += (
-                    f"🏷️ **{group_name}**\n"
-                    f"   📝 Type: {group_info['type']}\n"
+                    f"🏷️ **{group_data['name']}**\n"
+                    f"   📝 Type: {group_data['type']}\n"
                     f"   🆔 ID: `{group_id}`\n"
-                    f"   👥 Members: {group_info.get('member_count', 'Unknown')}\n"
+                    f"   👥 Members: {group_data.get('member_count', 'Unknown')}\n"
+                    f"   🔗 {group_data.get('username', 'No username')}\n"
                     f"   ⚠️ Could not refresh info\n"
                     f"   ➖ /disconnect_{group_id}\n\n"
                 )
             else:
                 message += (
-                    f"🏷️ **{group_name}**\n"
+                    f"🏷️ **{group_info['name']}**\n"
                     f"   🆔 ID: `{group_id}`\n"
                     f"   ⚠️ Could not fetch group info\n"
                     f"   ➖ /disconnect_{group_id}\n\n"
                 )
     
     message += "💡 Use /disconnect <group_id> to remove a group"
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /botstats command for detailed statistics"""
+    if update.message.chat.type != "private":
+        return
+    
+    if not is_owner(update.message.from_user.id):
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+    
+    stats = get_bot_stats(update.message.from_user.id)
+    
+    message = "🤖 **Bot Statistics**\n\n"
+    
+    # Overall stats
+    message += "📈 **Overall Statistics**\n"
+    message += f"• Total Active Groups: `{stats['total_connections']}`\n"
+    
+    if stats['all_time']:
+        message += f"• Total Messages Sent: `{stats['all_time'].get('total_messages', 0)}`\n"
+        message += f"• Total Replies Handled: `{stats['all_time'].get('total_replies', 0)}`\n"
+        message += f"• Total Connections Added: `{stats['all_time'].get('total_connections_added', 0)}`\n"
+        message += f"• Total Connections Removed: `{stats['all_time'].get('total_connections_removed', 0)}`\n"
+    
+    # Today's stats
+    message += "\n📊 **Today's Statistics**\n"
+    if stats['today']:
+        message += f"• Messages Sent: `{stats['today'].get('messages_sent', 0)}`\n"
+        message += f"• Replies Handled: `{stats['today'].get('replies_handled', 0)}`\n"
+        message += f"• Connections Added: `{stats['today'].get('connections_added', 0)}`\n"
+        message += f"• Connections Removed: `{stats['today'].get('connections_removed', 0)}`\n"
+    else:
+        message += "• No activity today\n"
+    
+    # Database info
+    total_db_connections = connections_collection.count_documents({
+        "owner_id": update.message.from_user.id
+    })
+    active_db_connections = connections_collection.count_documents({
+        "owner_id": update.message.from_user.id,
+        "is_active": True
+    })
+    
+    message += f"\n💾 **Database**\n"
+    message += f"• Total Records: `{total_db_connections}`\n"
+    message += f"• Active Connections: `{active_db_connections}`\n"
     
     await update.message.reply_text(message, parse_mode='Markdown')
 
@@ -281,6 +460,8 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                         reply_to_message_id=original_group_msg_id
                     )
                 
+                # Update stats
+                update_stats(user_id, "reply_handled")
                 await update.message.reply_text("✅ Your response has been sent to the group!")
                 
             except Exception as e:
@@ -298,7 +479,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     successful_forwards = 0
     failed_forwards = []
     
-    for group_id, group_name in connections.items():
+    for group_id, group_info in connections.items():
         try:
             if update.message.sticker:
                 await context.bot.send_sticker(
@@ -314,7 +495,12 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             successful_forwards += 1
         except Exception as e:
             logger.error(f"Failed to forward to group {group_id}: {e}")
-            failed_forwards.append(f"{group_name} (ID: {group_id})")
+            failed_forwards.append(f"{group_info['name']} (ID: {group_id})")
+    
+    # Update stats for successful sends
+    if successful_forwards > 0:
+        for _ in range(successful_forwards):
+            update_stats(user_id, "message_sent")
     
     # Send summary to owner
     if successful_forwards > 0 and not failed_forwards:
@@ -366,7 +552,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             }
             
             # Send info message to owner
-            group_name = owner_connections[group_id]
+            group_name = owner_connections[group_id]['name']
             user_name = update.message.from_user.first_name
             if update.message.from_user.username:
                 user_name = f"@{update.message.from_user.username}"
@@ -397,12 +583,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔧 Available Commands:\n"
         "• /connect <group_id> - Connect to a group\n"
         "• /disconnect [group_id] - Disconnect from group(s)\n"
-        "• /stats - Show all connected groups with details\n\n"
+        "• /stats - Show all connected groups with details\n"
+        "• /botstats - Detailed bot statistics and analytics\n\n"
         "🔄 Features:\n"
         "- Connect to multiple groups simultaneously\n"
         "- Messages are forwarded to ALL connected groups\n"
         "- Reply to group messages and bot will respond\n"
-        "- View detailed group statistics\n\n"
+        "- View detailed group statistics\n"
+        "- MongoDB database for reliable storage\n\n"
         "⚠️ Note: Only you (the owner) can use this bot."
     )
 
@@ -411,6 +599,7 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("connect", connect_command))
 application.add_handler(CommandHandler("disconnect", disconnect_command))
 application.add_handler(CommandHandler("stats", stats_command))
+application.add_handler(CommandHandler("botstats", botstats_command))
 
 # Handle quick disconnect commands (e.g., /disconnect_123456789)
 async def quick_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -426,6 +615,8 @@ async def quick_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if command.startswith("disconnect_"):
         try:
             group_id = int(command.split("_")[1])
+            # Set the group_id in context args for disconnect_command
+            context.args = [str(group_id)]
             await disconnect_command(update, context)
         except (ValueError, IndexError):
             await update.message.reply_text("❌ Invalid quick disconnect format!")
@@ -451,6 +642,7 @@ def start_bot():
     """Start Telegram bot in polling mode"""
     logger.info("Starting Telegram bot in polling mode...")
     logger.info(f"Owner ID: {OWNER_ID}")
+    logger.info(f"MongoDB URI: {MONGO_URI}")
     application.run_polling()
 
 if __name__ == "__main__":
