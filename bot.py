@@ -12,7 +12,7 @@ from telegram.ext import (
     ContextTypes
 )
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Configuration
 TOKEN = os.getenv("TOKEN")
@@ -34,10 +34,17 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # MongoDB setup
-client = MongoClient(MONGO_URI)
-db = client.telegram_bot
-connections_collection = db.connections
-stats_collection = db.stats
+try:
+    client = MongoClient(MONGO_URI)
+    db = client.telegram_bot
+    connections_collection = db.connections
+    stats_collection = db.stats
+    # Test connection
+    client.admin.command('ping')
+    logger.info("✅ MongoDB connection successful")
+except Exception as e:
+    logger.error(f"❌ MongoDB connection failed: {e}")
+    raise
 
 # Store message mappings for reply functionality
 message_mappings = {}
@@ -68,7 +75,7 @@ def save_connection(owner_id: int, group_id: int, group_name: str, group_usernam
         "group_id": group_id,
         "group_name": group_name,
         "group_username": group_username,
-        "connected_at": datetime.utcnow(),
+        "connected_at": datetime.now(timezone.utc),
         "is_active": True
     }
     
@@ -86,7 +93,7 @@ def remove_connection(owner_id: int, group_id: int):
     """Remove connection from MongoDB"""
     result = connections_collection.update_one(
         {"owner_id": owner_id, "group_id": group_id},
-        {"$set": {"is_active": False, "disconnected_at": datetime.utcnow()}}
+        {"$set": {"is_active": False, "disconnected_at": datetime.now(timezone.utc)}}
     )
     
     if result.modified_count > 0:
@@ -113,7 +120,15 @@ def get_all_connections(owner_id: int):
 
 def update_stats(owner_id: int, action: str):
     """Update statistics in MongoDB"""
-    today = datetime.utcnow().date()
+    # Use datetime for today's date at midnight UTC
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    update_fields = {
+        "messages_sent": 1 if action == "message_sent" else 0,
+        "connections_added": 1 if action == "connection_added" else 0,
+        "connections_removed": 1 if action == "connection_removed" else 0,
+        "replies_handled": 1 if action == "reply_handled" else 0
+    }
     
     stats_collection.update_one(
         {
@@ -121,12 +136,7 @@ def update_stats(owner_id: int, action: str):
             "date": today
         },
         {
-            "$inc": {
-                "messages_sent": 1 if action == "message_sent" else 0,
-                "connections_added": 1 if action == "connection_added" else 0,
-                "connections_removed": 1 if action == "connection_removed" else 0,
-                "replies_handled": 1 if action == "reply_handled" else 0
-            }
+            "$inc": update_fields
         },
         upsert=True
     )
@@ -139,8 +149,8 @@ def get_bot_stats(owner_id: int):
         "is_active": True
     })
     
-    # Today's stats
-    today = datetime.utcnow().date()
+    # Today's stats - use datetime for today at midnight UTC
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     today_stats = stats_collection.find_one({
         "owner_id": owner_id,
         "date": today
