@@ -560,20 +560,73 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 {"$set": {
                     "group_name": chat.title,
                     "group_username": username
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /stats command to show group details"""
+    if update.message.chat.type != "private":
+        return
+    
+    if not is_owner(update.message.from_user.id):
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+    
+    connections = get_all_connections(update.message.from_user.id)
+    
+    if not connections:
+        await update.message.reply_text("❌ You are not connected to any groups!")
+        return
+    
+    # Start building the message
+    message_parts = []
+    total_groups = len(connections)
+    total_members = 0
+    
+    # Add summary at the top
+    message_parts.append("📊 *Connected Groups*")
+    message_parts.append("")
+    message_parts.append(f"📈 *Total Groups Connected:* {total_groups}")
+    
+    # Get fresh info for each group
+    for group_id, group_info in connections.items():
+        try:
+            # Try to get updated group info
+            chat = await context.bot.get_chat(group_id)
+            member_count = getattr(chat, 'member_count', 'Unknown')
+            if isinstance(member_count, int):
+                total_members += member_count
+            
+            group_type = "Supergroup" if chat.type == "supergroup" else "Group"
+            username = f"@{chat.username}" if chat.username else "No username"
+            
+            # Update cache and database with fresh info
+            active_groups[group_id] = {
+                'name': chat.title,
+                'type': group_type,
+                'member_count': member_count,
+                'username': username
+            }
+            
+            # Update database with fresh info
+            connections_collection.update_one(
+                {"owner_id": update.message.from_user.id, "group_id": group_id},
+                {"$set": {
+                    "group_name": chat.title,
+                    "group_username": username
                 }}
             )
             
-            # Use Markdown formatting instead of HTML
-            message += (
-                f"🏷️ *{chat.title}*\n"
-                f"   📝 Type: {group_type}\n"
-                f"   🆔 ID: `{group_id}`\n"
-                f"   👥 Members: {member_count}\n"
-                f"   🔗 {username}\n"
-                f"   ➖ /disconnect_{group_id}\n\n"
-            )
+            # Escape any Markdown characters in the group name
+            group_name_escaped = chat.title.replace('*', '\\*').replace('_', '\\_').replace('`', '\\`').replace('[', '\\[')
+            
+            message_parts.append(f"🏷️ *{group_name_escaped}*")
+            message_parts.append(f"   📝 Type: {group_type}")
+            message_parts.append(f"   🆔 ID: `{group_id}`")
+            message_parts.append(f"   👥 Members: {member_count}")
+            message_parts.append(f"   🔗 {username}")
+            message_parts.append(f"   ➖ /disconnect_{group_id}")
+            message_parts.append("")
             
         except Exception as e:
+            logger.error(f"Error getting chat info for group {group_id}: {e}")
             # Use cached info if available
             if group_id in active_groups:
                 group_data = active_groups[group_id]
@@ -581,34 +634,45 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if isinstance(member_count, int):
                     total_members += member_count
                 
-                message += (
-                    f"🏷️ *{group_data['name']}*\n"
-                    f"   📝 Type: {group_data['type']}\n"
-                    f"   🆔 ID: `{group_id}`\n"
-                    f"   👥 Members: {member_count}\n"
-                    f"   🔗 {group_data.get('username', 'No username')}\n"
-                    f"   ⚠️ Could not refresh info\n"
-                    f"   ➖ /disconnect_{group_id}\n\n"
-                )
+                # Escape any Markdown characters in the group name
+                group_name_escaped = group_data['name'].replace('*', '\\*').replace('_', '\\_').replace('`', '\\`').replace('[', '\\[')
+                
+                message_parts.append(f"🏷️ *{group_name_escaped}*")
+                message_parts.append(f"   📝 Type: {group_data['type']}")
+                message_parts.append(f"   🆔 ID: `{group_id}`")
+                message_parts.append(f"   👥 Members: {member_count}")
+                message_parts.append(f"   🔗 {group_data.get('username', 'No username')}")
+                message_parts.append(f"   ⚠️ Could not refresh info")
+                message_parts.append(f"   ➖ /disconnect_{group_id}")
+                message_parts.append("")
             else:
-                message += (
-                    f"🏷️ *{group_info['name']}*\n"
-                    f"   🆔 ID: `{group_id}`\n"
-                    f"   ⚠️ Could not fetch group info\n"
-                    f"   ➖ /disconnect_{group_id}\n\n"
-                )
+                # Escape any Markdown characters in the group name
+                group_name_escaped = group_info['name'].replace('*', '\\*').replace('_', '\\_').replace('`', '\\`').replace('[', '\\[')
+                
+                message_parts.append(f"🏷️ *{group_name_escaped}*")
+                message_parts.append(f"   🆔 ID: `{group_id}`")
+                message_parts.append(f"   ⚠️ Could not fetch group info")
+                message_parts.append(f"   ➖ /disconnect_{group_id}")
+                message_parts.append("")
     
-    # Add summary at the top
-    summary = f"📈 *Total Groups Connected:* {total_groups}\n"
+    # Add total members to summary if we have the data
     if total_members > 0:
-        summary += f"👥 *Total Members:* {total_members}\n\n"
+        message_parts[2] = f"📈 *Total Groups Connected:* {total_groups}"
+        message_parts.insert(3, f"👥 *Total Members:* {total_members}")
+    
+    message_parts.append("💡 Use /disconnect <group_id> to remove a group")
+    
+    # Join all parts and send
+    final_message = "\n".join(message_parts)
+    
+    # If message is too long, split it
+    if len(final_message) > 4000:
+        # Split into chunks of 4000 characters
+        chunks = [final_message[i:i+4000] for i in range(0, len(final_message), 4000)]
+        for chunk in chunks:
+            await update.message.reply_text(chunk, parse_mode='Markdown')
     else:
-        summary += "\n"
-    
-    message = summary + message
-    message += "💡 Use /disconnect <group_id> to remove a group"
-    
-    await update.message.reply_text(message, parse_mode='Markdown')
+        await update.message.reply_text(final_message, parse_mode='Markdown')
 
 async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /botstats command for detailed statistics"""
