@@ -304,23 +304,59 @@ async def handle_group_selection(update: Update, context: ContextTypes.DEFAULT_T
         
         for group_id in selected_groups:
             try:
-                if message_data["type"] == "sticker":
-                    sent_message = await context.bot.send_sticker(
-                        chat_id=group_id,
-                        sticker=message_data["sticker_id"]
-                    )
-                elif message_data["type"] == "text":
+                if message_data["type"] == "text":
                     sent_message = await context.bot.send_message(
                         chat_id=group_id,
                         text=message_data["text"]
                     )
+                elif message_data["type"] == "sticker":
+                    sent_message = await context.bot.send_sticker(
+                        chat_id=group_id,
+                        sticker=message_data["sticker_id"]
+                    )
+                elif message_data["type"] == "photo":
+                    sent_message = await context.bot.send_photo(
+                        chat_id=group_id,
+                        photo=message_data["photo_id"],
+                        caption=message_data.get("caption", "")
+                    )
+                elif message_data["type"] == "video":
+                    sent_message = await context.bot.send_video(
+                        chat_id=group_id,
+                        video=message_data["video_id"],
+                        caption=message_data.get("caption", "")
+                    )
+                elif message_data["type"] == "document":
+                    sent_message = await context.bot.send_document(
+                        chat_id=group_id,
+                        document=message_data["document_id"],
+                        caption=message_data.get("caption", "")
+                    )
+                elif message_data["type"] == "audio":
+                    sent_message = await context.bot.send_audio(
+                        chat_id=group_id,
+                        audio=message_data["audio_id"],
+                        caption=message_data.get("caption", "")
+                    )
+                elif message_data["type"] == "voice":
+                    sent_message = await context.bot.send_voice(
+                        chat_id=group_id,
+                        voice=message_data["voice_id"]
+                    )
+                elif message_data["type"] == "animation":
+                    sent_message = await context.bot.send_animation(
+                        chat_id=group_id,
+                        animation=message_data["animation_id"],
+                        caption=message_data.get("caption", "")
+                    )
                 else:
-                    # For other media types
+                    # Fallback to copy_message for other types
                     sent_message = await context.bot.copy_message(
                         chat_id=group_id,
                         from_chat_id=message_data["chat_id"],
                         message_id=message_data["message_id"]
                     )
+                
                 successful_forwards += 1
                 
                 # Store mapping for reactions - group message to private message
@@ -494,9 +530,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ You are not connected to any groups!")
         return
     
-    message = "📊 Connected Groups\n\n"
+    message = "📊 **Connected Groups**\n\n"
     total_groups = len(connections)
-    message += f"📈 Total Groups Connected: {total_groups}\n\n"
+    total_members = 0
     
     # Get fresh info for each group
     for group_id, group_info in connections.items():
@@ -504,6 +540,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Try to get updated group info
             chat = await context.bot.get_chat(group_id)
             member_count = getattr(chat, 'member_count', 'Unknown')
+            if isinstance(member_count, int):
+                total_members += member_count
+            
             group_type = "Supergroup" if chat.type == "supergroup" else "Group"
             username = f"@{chat.username}" if chat.username else "No username"
             
@@ -525,7 +564,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             message += (
-                f"🏷️ **{chat.title}**\n"
+                f"🏷️ **{html.escape(chat.title)}**\n"
                 f"   📝 Type: {group_type}\n"
                 f"   🆔 ID: `{group_id}`\n"
                 f"   👥 Members: {member_count}\n"
@@ -537,26 +576,38 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Use cached info if available
             if group_id in active_groups:
                 group_data = active_groups[group_id]
+                member_count = group_data.get('member_count', 'Unknown')
+                if isinstance(member_count, int):
+                    total_members += member_count
+                
                 message += (
-                    f"🏷️ **{group_data['name']}**\n"
+                    f"🏷️ **{html.escape(group_data['name'])}**\n"
                     f"   📝 Type: {group_data['type']}\n"
                     f"   🆔 ID: `{group_id}`\n"
-                    f"   👥 Members: {group_data.get('member_count', 'Unknown')}\n"
+                    f"   👥 Members: {member_count}\n"
                     f"   🔗 {group_data.get('username', 'No username')}\n"
                     f"   ⚠️ Could not refresh info\n"
                     f"   ➖ /disconnect_{group_id}\n\n"
                 )
             else:
                 message += (
-                    f"🏷️ **{group_info['name']}**\n"
+                    f"🏷️ **{html.escape(group_info['name'])}**\n"
                     f"   🆔 ID: `{group_id}`\n"
                     f"   ⚠️ Could not fetch group info\n"
                     f"   ➖ /disconnect_{group_id}\n\n"
                 )
     
+    # Add summary at the top
+    summary = f"📈 **Total Groups Connected:** {total_groups}\n"
+    if total_members > 0:
+        summary += f"👥 **Total Members:** {total_members}\n\n"
+    else:
+        summary += "\n"
+    
+    message = summary + message
     message += "💡 Use /disconnect <group_id> to remove a group"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(message, parse_mode='HTML')
 
 async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /botstats command for detailed statistics"""
@@ -569,29 +620,29 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     stats = get_bot_stats(update.message.from_user.id)
     
-    message = "🤖 **Bot Statistics**\n\n"
+    message = "🤖 <b>Bot Statistics</b>\n\n"
     
     # Overall stats
-    message += "📈 **Overall Statistics**\n"
-    message += f"• Total Active Groups: `{stats['total_connections']}`\n"
+    message += "📈 <b>Overall Statistics</b>\n"
+    message += f"• Total Active Groups: <code>{stats['total_connections']}</code>\n"
     
     if stats['all_time']:
-        message += f"• Total Messages Sent: `{stats['all_time'].get('total_messages', 0)}`\n"
-        message += f"• Total Replies Handled: `{stats['all_time'].get('total_replies', 0)}`\n"
-        message += f"• Total Reactions Handled: `{stats['all_time'].get('total_reactions', 0)}`\n"
-        message += f"• Total Edits Handled: `{stats['all_time'].get('total_edits', 0)}`\n"
-        message += f"• Total Connections Added: `{stats['all_time'].get('total_connections_added', 0)}`\n"
-        message += f"• Total Connections Removed: `{stats['all_time'].get('total_connections_removed', 0)}`\n"
+        message += f"• Total Messages Sent: <code>{stats['all_time'].get('total_messages', 0)}</code>\n"
+        message += f"• Total Replies Handled: <code>{stats['all_time'].get('total_replies', 0)}</code>\n"
+        message += f"• Total Reactions Handled: <code>{stats['all_time'].get('total_reactions', 0)}</code>\n"
+        message += f"• Total Edits Handled: <code>{stats['all_time'].get('total_edits', 0)}</code>\n"
+        message += f"• Total Connections Added: <code>{stats['all_time'].get('total_connections_added', 0)}</code>\n"
+        message += f"• Total Connections Removed: <code>{stats['all_time'].get('total_connections_removed', 0)}</code>\n"
     
     # Today's stats
-    message += "\n📊 **Today's Statistics**\n"
+    message += "\n📊 <b>Today's Statistics</b>\n"
     if stats['today']:
-        message += f"• Messages Sent: `{stats['today'].get('messages_sent', 0)}`\n"
-        message += f"• Replies Handled: `{stats['today'].get('replies_handled', 0)}`\n"
-        message += f"• Reactions Handled: `{stats['today'].get('reactions_handled', 0)}`\n"
-        message += f"• Edits Handled: `{stats['today'].get('edits_handled', 0)}`\n"
-        message += f"• Connections Added: `{stats['today'].get('connections_added', 0)}`\n"
-        message += f"• Connections Removed: `{stats['today'].get('connections_removed', 0)}`\n"
+        message += f"• Messages Sent: <code>{stats['today'].get('messages_sent', 0)}</code>\n"
+        message += f"• Replies Handled: <code>{stats['today'].get('replies_handled', 0)}</code>\n"
+        message += f"• Reactions Handled: <code>{stats['today'].get('reactions_handled', 0)}</code>\n"
+        message += f"• Edits Handled: <code>{stats['today'].get('edits_handled', 0)}</code>\n"
+        message += f"• Connections Added: <code>{stats['today'].get('connections_added', 0)}</code>\n"
+        message += f"• Connections Removed: <code>{stats['today'].get('connections_removed', 0)}</code>\n"
     else:
         message += "• No activity today\n"
     
@@ -604,11 +655,11 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "is_active": True
     })
     
-    message += f"\n💾 **Database**\n"
-    message += f"• Total Records: `{total_db_connections}`\n"
-    message += f"• Active Connections: `{active_db_connections}`\n"
+    message += f"\n💾 <b>Database</b>\n"
+    message += f"• Total Records: <code>{total_db_connections}</code>\n"
+    message += f"• Active Connections: <code>{active_db_connections}</code>\n"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(message, parse_mode='HTML')
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming private messages from owner"""
@@ -656,6 +707,47 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     sent_message = await context.bot.send_message(
                         chat_id=target_group_id,
                         text=update.message.text,
+                        reply_to_message_id=original_group_msg_id
+                    )
+                elif update.message.photo:
+                    sent_message = await context.bot.send_photo(
+                        chat_id=target_group_id,
+                        photo=update.message.photo[-1].file_id,
+                        caption=update.message.caption,
+                        reply_to_message_id=original_group_msg_id
+                    )
+                elif update.message.video:
+                    sent_message = await context.bot.send_video(
+                        chat_id=target_group_id,
+                        video=update.message.video.file_id,
+                        caption=update.message.caption,
+                        reply_to_message_id=original_group_msg_id
+                    )
+                elif update.message.document:
+                    sent_message = await context.bot.send_document(
+                        chat_id=target_group_id,
+                        document=update.message.document.file_id,
+                        caption=update.message.caption,
+                        reply_to_message_id=original_group_msg_id
+                    )
+                elif update.message.audio:
+                    sent_message = await context.bot.send_audio(
+                        chat_id=target_group_id,
+                        audio=update.message.audio.file_id,
+                        caption=update.message.caption,
+                        reply_to_message_id=original_group_msg_id
+                    )
+                elif update.message.voice:
+                    sent_message = await context.bot.send_voice(
+                        chat_id=target_group_id,
+                        voice=update.message.voice.file_id,
+                        reply_to_message_id=original_group_msg_id
+                    )
+                elif update.message.animation:
+                    sent_message = await context.bot.send_animation(
+                        chat_id=target_group_id,
+                        animation=update.message.animation.file_id,
+                        caption=update.message.caption,
                         reply_to_message_id=original_group_msg_id
                     )
                 else:
@@ -718,6 +810,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         "text": update.message.text if update.message.text else "Media message"
     }
     
+    # Determine message type and prepare data
     if update.message.sticker:
         message_data = {
             "type": "sticker",
@@ -726,18 +819,65 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             "sticker_id": update.message.sticker.file_id,
             "preview": "🎨 Sticker"
         }
+    elif update.message.photo:
+        message_data = {
+            "type": "photo",
+            "chat_id": update.message.chat_id,
+            "message_id": update.message.message_id,
+            "photo_id": update.message.photo[-1].file_id,
+            "caption": update.message.caption,
+            "preview": "🖼️ Photo" + (f" - {update.message.caption}" if update.message.caption else "")
+        }
+    elif update.message.video:
+        message_data = {
+            "type": "video",
+            "chat_id": update.message.chat_id,
+            "message_id": update.message.message_id,
+            "video_id": update.message.video.file_id,
+            "caption": update.message.caption,
+            "preview": "🎥 Video" + (f" - {update.message.caption}" if update.message.caption else "")
+        }
+    elif update.message.document:
+        message_data = {
+            "type": "document",
+            "chat_id": update.message.chat_id,
+            "message_id": update.message.message_id,
+            "document_id": update.message.document.file_id,
+            "caption": update.message.caption,
+            "preview": "📄 Document" + (f" - {update.message.caption}" if update.message.caption else "")
+        }
+    elif update.message.audio:
+        message_data = {
+            "type": "audio",
+            "chat_id": update.message.chat_id,
+            "message_id": update.message.message_id,
+            "audio_id": update.message.audio.file_id,
+            "caption": update.message.caption,
+            "preview": "🎵 Audio" + (f" - {update.message.caption}" if update.message.caption else "")
+        }
+    elif update.message.voice:
+        message_data = {
+            "type": "voice",
+            "chat_id": update.message.chat_id,
+            "message_id": update.message.message_id,
+            "voice_id": update.message.voice.file_id,
+            "preview": "🎤 Voice Message"
+        }
+    elif update.message.animation:
+        message_data = {
+            "type": "animation",
+            "chat_id": update.message.chat_id,
+            "message_id": update.message.message_id,
+            "animation_id": update.message.animation.file_id,
+            "caption": update.message.caption,
+            "preview": "🎬 Animation" + (f" - {update.message.caption}" if update.message.caption else "")
+        }
     elif update.message.text:
         # Truncate long text for preview
         preview = update.message.text
         if len(preview) > 100:
             preview = preview[:97] + "..."
         message_data["preview"] = preview
-    else:
-        # For media messages
-        caption_preview = update.message.caption or "Media message"
-        if len(caption_preview) > 100:
-            caption_preview = caption_preview[:97] + "..."
-        message_data["preview"] = caption_preview
     
     # Store pending message
     pending_messages[user_id] = {
