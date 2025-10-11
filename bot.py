@@ -530,7 +530,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ You are not connected to any groups!")
         return
     
-    message = "📊 **Connected Groups**\n\n"
+    message = "📊 Connected Groups\n\n"
     total_groups = len(connections)
     total_members = 0
     
@@ -563,8 +563,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }}
             )
             
+            # Use Markdown formatting instead of HTML
             message += (
-                f"🏷️ **{html.escape(chat.title)}**\n"
+                f"🏷️ *{chat.title}*\n"
                 f"   📝 Type: {group_type}\n"
                 f"   🆔 ID: `{group_id}`\n"
                 f"   👥 Members: {member_count}\n"
@@ -581,7 +582,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     total_members += member_count
                 
                 message += (
-                    f"🏷️ **{html.escape(group_data['name'])}**\n"
+                    f"🏷️ *{group_data['name']}*\n"
                     f"   📝 Type: {group_data['type']}\n"
                     f"   🆔 ID: `{group_id}`\n"
                     f"   👥 Members: {member_count}\n"
@@ -591,23 +592,23 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             else:
                 message += (
-                    f"🏷️ **{html.escape(group_info['name'])}**\n"
+                    f"🏷️ *{group_info['name']}*\n"
                     f"   🆔 ID: `{group_id}`\n"
                     f"   ⚠️ Could not fetch group info\n"
                     f"   ➖ /disconnect_{group_id}\n\n"
                 )
     
     # Add summary at the top
-    summary = f"📈 **Total Groups Connected:** {total_groups}\n"
+    summary = f"📈 *Total Groups Connected:* {total_groups}\n"
     if total_members > 0:
-        summary += f"👥 **Total Members:** {total_members}\n\n"
+        summary += f"👥 *Total Members:* {total_members}\n\n"
     else:
         summary += "\n"
     
     message = summary + message
     message += "💡 Use /disconnect <group_id> to remove a group"
     
-    await update.message.reply_text(message, parse_mode='HTML')
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /botstats command for detailed statistics"""
@@ -620,29 +621,29 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     stats = get_bot_stats(update.message.from_user.id)
     
-    message = "🤖 <b>Bot Statistics</b>\n\n"
+    message = "🤖 *Bot Statistics*\n\n"
     
     # Overall stats
-    message += "📈 <b>Overall Statistics</b>\n"
-    message += f"• Total Active Groups: <code>{stats['total_connections']}</code>\n"
+    message += "📈 *Overall Statistics*\n"
+    message += f"• Total Active Groups: `{stats['total_connections']}`\n"
     
     if stats['all_time']:
-        message += f"• Total Messages Sent: <code>{stats['all_time'].get('total_messages', 0)}</code>\n"
-        message += f"• Total Replies Handled: <code>{stats['all_time'].get('total_replies', 0)}</code>\n"
-        message += f"• Total Reactions Handled: <code>{stats['all_time'].get('total_reactions', 0)}</code>\n"
-        message += f"• Total Edits Handled: <code>{stats['all_time'].get('total_edits', 0)}</code>\n"
-        message += f"• Total Connections Added: <code>{stats['all_time'].get('total_connections_added', 0)}</code>\n"
-        message += f"• Total Connections Removed: <code>{stats['all_time'].get('total_connections_removed', 0)}</code>\n"
+        message += f"• Total Messages Sent: `{stats['all_time'].get('total_messages', 0)}`\n"
+        message += f"• Total Replies Handled: `{stats['all_time'].get('total_replies', 0)}`\n"
+        message += f"• Total Reactions Handled: `{stats['all_time'].get('total_reactions', 0)}`\n"
+        message += f"• Total Edits Handled: `{stats['all_time'].get('total_edits', 0)}`\n"
+        message += f"• Total Connections Added: `{stats['all_time'].get('total_connections_added', 0)}`\n"
+        message += f"• Total Connections Removed: `{stats['all_time'].get('total_connections_removed', 0)}`\n"
     
     # Today's stats
-    message += "\n📊 <b>Today's Statistics</b>\n"
+    message += "\n📊 *Today's Statistics*\n"
     if stats['today']:
-        message += f"• Messages Sent: <code>{stats['today'].get('messages_sent', 0)}</code>\n"
-        message += f"• Replies Handled: <code>{stats['today'].get('replies_handled', 0)}</code>\n"
-        message += f"• Reactions Handled: <code>{stats['today'].get('reactions_handled', 0)}</code>\n"
-        message += f"• Edits Handled: <code>{stats['today'].get('edits_handled', 0)}</code>\n"
-        message += f"• Connections Added: <code>{stats['today'].get('connections_added', 0)}</code>\n"
-        message += f"• Connections Removed: <code>{stats['today'].get('connections_removed', 0)}</code>\n"
+        message += f"• Messages Sent: `{stats['today'].get('messages_sent', 0)}`\n"
+        message += f"• Replies Handled: `{stats['today'].get('replies_handled', 0)}`\n"
+        message += f"• Reactions Handled: `{stats['today'].get('reactions_handled', 0)}`\n"
+        message += f"• Edits Handled: `{stats['today'].get('edits_handled', 0)}`\n"
+        message += f"• Connections Added: `{stats['today'].get('connections_added', 0)}`\n"
+        message += f"• Connections Removed: `{stats['today'].get('connections_removed', 0)}`\n"
     else:
         message += "• No activity today\n"
     
@@ -655,11 +656,11 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "is_active": True
     })
     
-    message += f"\n💾 <b>Database</b>\n"
-    message += f"• Total Records: <code>{total_db_connections}</code>\n"
-    message += f"• Active Connections: <code>{active_db_connections}</code>\n"
+    message += f"\n💾 *Database*\n"
+    message += f"• Total Records: `{total_db_connections}`\n"
+    message += f"• Active Connections: `{active_db_connections}`\n"
     
-    await update.message.reply_text(message, parse_mode='HTML')
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming private messages from owner"""
