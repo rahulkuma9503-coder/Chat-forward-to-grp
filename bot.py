@@ -560,7 +560,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'username': username
             }
             
-            # Update database with fresh info
+            # Update database with fresh info - FIXED: Added missing closing brace
             connections_collection.update_one(
                 {"owner_id": update.message.from_user.id, "group_id": group_id},
                 {"$set": {
